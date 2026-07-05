@@ -1,0 +1,7 @@
+[package]
+name = "kdbx-roundtrip"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+keepass = { version = "0.13.13", features = ["save_kdbx4"] }

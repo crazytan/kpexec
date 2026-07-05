@@ -1,0 +1,5 @@
+# Rust build output
+/target
+
+# Spike crates keep their own build output out of version control too.
+spikes/*/target
