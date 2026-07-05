@@ -285,6 +285,36 @@ impl Vault {
         }
     }
 
+    /// Read one entry's secret (the KeePass `Password` field) into zeroizing
+    /// memory.
+    ///
+    /// This is deliberately a **separate** call from [`Vault::find_entry`]: the
+    /// run path resolves the entry + command (and verifies the pin) via
+    /// `find_entry` alone, and only ever calls this on the actual spawn path.
+    /// `--dry-run` never calls it, which is what makes the "no secret read on
+    /// dry-run" guarantee structural rather than a convention.
+    ///
+    /// Rejects on a missing/empty Password or a duplicate id (deny by default).
+    pub fn read_secret(&self, id: &str) -> Result<Secret> {
+        // Reuse the duplicate-rejecting resolver so identity stays consistent.
+        let entry_id = self.entry_id_of(id)?;
+        for entry in self.db.iter_all_entries() {
+            if entry.id() == entry_id {
+                return match entry.get_password() {
+                    Some(p) if !p.is_empty() => Ok(Secret::new(p.to_string())),
+                    _ => Err(KpexecError::new(
+                        KpexecStatus::MalformedPolicy,
+                        format!("entry {id} has no secret in its Password field"),
+                    )),
+                };
+            }
+        }
+        Err(KpexecError::new(
+            KpexecStatus::UnknownEntry,
+            format!("entry {id} not found"),
+        ))
+    }
+
     /// Whether an entry with `id` already exists (any count).
     pub fn contains(&self, id: &str) -> bool {
         self.raw_entries().iter().any(|r| r.id == id)

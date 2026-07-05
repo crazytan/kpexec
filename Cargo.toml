@@ -24,6 +24,11 @@ rpassword = "7"
 shell-words = "1"
 rand = "0.8"
 
+[target.'cfg(unix)'.dependencies]
+# Direct SIGTERM delivery for the graceful-then-forceful timeout (std's
+# Child::kill only sends SIGKILL). Unix-only; the run path is macOS/Unix.
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
 

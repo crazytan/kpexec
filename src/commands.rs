@@ -5,10 +5,10 @@
 //! the milestone that will implement it, via the structured error path — never
 //! a `todo!()`/`panic!`.
 
-use crate::cli::{Command, DbCommand, EntryCommand, RunArgs};
+use crate::cli::{Command, DbCommand, EntryCommand};
 use crate::error::{KpexecError, Result};
-use crate::status::{JsonEnvelope, KpexecStatus, Outcome};
-use crate::{cmd_check, cmd_entry, cmd_init, config, doctor};
+use crate::status::Outcome;
+use crate::{cmd_check, cmd_entry, cmd_init, cmd_run, doctor};
 
 /// Dispatch a parsed command to its handler.
 ///
@@ -17,7 +17,7 @@ use crate::{cmd_check, cmd_entry, cmd_init, config, doctor};
 /// handlers that support it (currently `run`).
 pub fn dispatch(command: Command) -> Result<Outcome> {
     match command {
-        Command::Run(args) => run(args),
+        Command::Run(args) => cmd_run::run(args),
         Command::Init(args) => cmd_init::run(args),
         Command::Doctor => doctor_cmd(),
         Command::Entry(sub) => entry(sub),
@@ -31,26 +31,6 @@ fn doctor_cmd() -> Result<Outcome> {
     let report = doctor::run()?;
     print!("{}", report.render());
     Ok(Outcome::Kpexec(report.status()))
-}
-
-/// `kpexec run` — the run path is M4. In M1 it fails closed, honoring `--json`
-/// so the not-implemented status is machine-readable even now.
-fn run(args: RunArgs) -> Result<Outcome> {
-    // Config is loaded so an invalid config is reported as config-error even on
-    // the stubbed run path (exercises the untrusted-hint semantics end to end).
-    let _cfg = config::load()?;
-
-    let status = KpexecStatus::NotImplemented;
-    if args.json {
-        let diag = "[kpexec] run is not implemented yet (milestone 4)".to_string();
-        println!(
-            "{}",
-            JsonEnvelope::kpexec_with_stderr(status, diag).to_json()
-        );
-        Ok(Outcome::Kpexec(status))
-    } else {
-        Err(KpexecError::not_implemented("run", 4))
-    }
 }
 
 fn entry(sub: EntryCommand) -> Result<Outcome> {
@@ -82,6 +62,7 @@ fn db(sub: DbCommand) -> Result<Outcome> {
 mod tests {
     use super::*;
     use crate::cli::*;
+    use crate::status::KpexecStatus;
 
     #[test]
     fn db_stubs_still_not_implemented() {

@@ -149,16 +149,36 @@ fn db_maintenance_commands_return_not_implemented_cleanly() {
 }
 
 #[test]
-fn run_json_stub_emits_not_implemented_envelope() {
-    // The run stub honors --json even before M4, returning the envelope shape.
-    let cli = parse(&["run", "--entry", "e", "--command", "c", "--json"]).unwrap();
-    // dispatch prints the envelope and returns an Outcome (not an Err) on the
-    // --json path; we assert the exit code lands in the reserved band.
-    let outcome = commands::dispatch(cli.command).unwrap();
-    assert_eq!(
-        outcome.exit_code(),
-        KpexecStatus::NotImplemented.exit_code()
-    );
+fn run_flags_parse_into_run_args() {
+    // M4 implements `run`, so its real behavior is exercised end-to-end in
+    // tests/run_path.rs against a temp vault + fake keychain. Here we only assert
+    // the flag surface parses as intended — deterministic and touching neither
+    // config nor the keychain (dispatching `run` would consult both).
+    let cli = parse(&[
+        "run",
+        "--entry",
+        "e",
+        "--command",
+        "c",
+        "--json",
+        "--dry-run",
+        "--timeout",
+        "42",
+        "--",
+        "trailing",
+    ])
+    .unwrap();
+    match cli.command {
+        Command::Run(args) => {
+            assert_eq!(args.entry, "e");
+            assert_eq!(args.command, "c");
+            assert!(args.json);
+            assert!(args.dry_run);
+            assert_eq!(args.timeout, Some(42));
+            assert_eq!(args.trailing, vec!["trailing"]);
+        }
+        other => panic!("expected run, got {other:?}"),
+    }
 }
 
 #[test]
