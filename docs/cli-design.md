@@ -73,8 +73,11 @@ Rules:
 - Identity lives only in the `kpexec.id` field; the policy JSON carries no duplicate id. Duplicate `kpexec.id` values across the vault, malformed JSON, or unknown fields ⇒ the run is rejected (deny by default, deterministic — never "pick first").
 - Redaction is always on; there is no policy field to disable it.
 - Schema is versioned via the `"schema"` field; future revisions add `kpexec.policy.v2` rather than mutating v1.
-- kpexec reads and writes the vault itself (KDBX4 save). Writes take a kpexec-level lock, are atomic (write-temp-then-rename with a backup of the previous file), and refuse to proceed if a KeePassXC lockfile is present. Hand-editing in KeePassXC is supported — close it first, run `kpexec check` afterwards.
-- Keychain: service `dev.kpexec`, account `db-password:<fp>` where `<fp>` = first 12 hex chars of SHA-256 of the canonical vault path. The item's ACL is bound to the developer's Team ID + identifier `dev.kpexec` (see security-design.md).
+- kpexec reads and writes the vault itself (KDBX4 save). Writes take a kpexec-level lock, are atomic (write-temp-then-rename with a backup of the previous file), and refuse to proceed if a KeePassXC lockfile is present. The kpexec lock records PID + start time; a lock whose holder is no longer running is reclaimed. A crash mid-write leaves a temp file behind and the original vault intact. Hand-editing in KeePassXC is supported — close it first, run `kpexec check` afterwards.
+- Keychain: service `dev.crazytan.kpexec`, account `db-password:<fp>` where `<fp>` = first 12 hex chars of SHA-256 of the canonical vault path. The item's ACL is bound to the developer's Team ID + identifier `dev.crazytan.kpexec` (see security-design.md). The item *value* is a small JSON document `{"password": "...", "db_path": "..."}` — the vault's identity lives inside the ACL-protected item, and `config.toml` (agent-writable) is only a hint that must agree with it; kpexec never opens a vault the protected item doesn't name.
+- Every invocation — including `entry list` — pays a full Argon2id unlock; there is no daemon or session cache by design. KDF parameters are tuned at `init` to ~0.5 s on the local machine; agents should budget roughly a second of overhead per call.
+
+Reserved extensions (recorded now so the schema doesn't need a breaking redesign; will ship under a bumped `schema` string, since v1 rejects unknown fields): per-command `args` constraints (flag allow/deny lists, positional caps), a `cwd` restriction, and `exe_sha256` binary pinning paired with a Touch ID–gated `kpexec entry repin <id>` flow for legitimate upgrades of the target binary.
 
 ## User journey
 
@@ -92,11 +95,11 @@ Mutating commands are marked **[Touch ID]** — each ends in a user-presence pro
 - `kpexec init [--db <path>] [--use-existing]` **[Touch ID]**
   Default: creates `~/Secrets/kpexec-agent.kdbx` with a generated master password stored in macOS Keychain (ACL-bound to kpexec), plus `~/.config/kpexec/config.toml`. Prints the master password **once** as a recovery key, with instructions to store it outside the agent's reach (personal password manager or paper). `--use-existing` adopts an existing kdbx (prompts for its password once, stores it in Keychain).
 - `kpexec doctor`
-  Validates config, Keychain item and its ACL binding, DB openability, and kpexec's own code signature; warns if project `.env*` files near cwd contain any env var name that a policy injects.
+  Validates config (including that `db_path` agrees with the path embedded in the Keychain item), the Keychain item and its ACL binding, DB openability, and kpexec's own code signature; warns if project `.env*` files near cwd contain any env var name that a policy injects, and when a policy executable lives inside a project tree (e.g. `node_modules/.bin`) or another location writable by the current user — the scenario binary hash pinning will eventually close.
 
 ### Entry & policy management (secrets never printed)
 
-- `kpexec entry add [<id>]` **[Touch ID]** — wizard; writes the KeePass entry and generates the policy JSON. Loops so one entry can collect any number of command templates. Prefix input is parsed with shell-word rules (quoting supported); the wizard warns when a prefix is empty or a single word, since short prefixes grant broad surface.
+- `kpexec entry add [<id>]` **[Touch ID]** — wizard; writes the KeePass entry and generates the policy JSON. Loops so one entry can collect any number of command templates. Prefix input is parsed with shell-word rules (quoting supported); the wizard warns when a prefix is empty or a single word, since short prefixes grant broad surface. Secrets shorter than 8 characters are refused — redacting very short strings is unreliable and shreds output with false positives.
 - `kpexec entry add-command <id>` **[Touch ID]** — append another command template (grant a new action without re-entering the secret).
 - `kpexec entry rm-command <id> <name>` **[Touch ID]** — revoke a single action.
 - `kpexec entry set-secret <id>` **[Touch ID]** — rotate the stored credential without touching the policy.
@@ -170,6 +173,7 @@ $ kpexec entry add-command github
   - `--command` is always required, even for single-template entries — optionality would make existing invocations break the moment a second template is added.
   - `--dry-run`: resolves entry + command and prints the exact argv that would run — no secret read, no subprocess.
   - `--timeout` default 300 s; on expiry the child gets SIGTERM, then SIGKILL after 5 s; partial output is redacted and returned with a timeout status.
+  - Output is fully buffered: nothing is emitted until the child exits (or times out), and redaction runs over the complete output. V1 has no streaming mode — streaming would require chunk-boundary-safe secret scanning and is deferred.
   - `--json` emits a structured result: `{ "kpexec_status": "...", "child_exit_code": N, "stdout": "...", "stderr": "..." }`. This is the authoritative way for agents to distinguish kpexec-level failures from child failures.
   - Exit codes: child's exit code propagated verbatim on execution. kpexec-level failures use a reserved band (100+: unknown-entry, unknown-command, malformed-policy, unlock-failed, redaction-failure, timeout, config-error, internal). Children can legitimately exit 100–125, so the band is a convenience — `--json` is the reliable channel.
 
@@ -204,9 +208,18 @@ $ kpexec run --entry github -- pr list
 - `entry list --json` / `--dry-run` let the agent discover what is allowed and pre-validate a request before running it.
 - `run` never blocks on a prompt: no Touch ID, no stdin.
 
-## Milestone-zero validations (de-risk before building on top)
+## Config file & logs
 
-1. **KDBX4 write round-trip:** create/modify a vault with the Rust `keepass` crate, open and edit it in KeePassXC, read it back. Write support is younger than read support; the whole design leans on it.
-2. **Keychain ACL behavior for a CLI tool:** confirm the Team ID + identifier partition list lets the signed kpexec read the item silently, prompts for any other process, and survives a kpexec version upgrade without re-prompting.
-3. **LocalAuthentication from a CLI:** confirm the Touch ID / account-password sheet can be invoked from a signed, hardened-runtime command-line binary in a normal terminal session (and fails closed over SSH / headless).
-4. **Signing pipeline:** Developer ID + hardened runtime + notarization on the release artifact; verify a self-built (unsigned) binary degrades the ACL as documented rather than silently appearing to work.
+```toml
+# ~/.config/kpexec/config.toml — untrusted hints only; never secrets
+db_path = "/Users/tan/Secrets/kpexec-agent.kdbx"  # must agree with the path inside the Keychain item
+default_timeout_sec = 300
+```
+
+The config file is agent-writable and therefore untrusted input: it can point kpexec at things, but the ACL-protected Keychain item decides which vault is real (see the KDBX translation rules above and security-design.md).
+
+Logs: `~/Library/Logs/kpexec/kpexec.log`, size-capped rotation (e.g. 5 MB × 3). Each run logs entry id, command name, canonical exe, a hash of the full argv, and the result — never the secret, never raw trailing args, and never the full command line by default (paths, branch names, and titles can themselves be sensitive).
+
+## Milestones & acceptance tests
+
+See [milestones.md](milestones.md) for the de-risking spikes (milestone zero), the implementation milestones, and the acceptance test list.
