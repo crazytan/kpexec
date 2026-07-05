@@ -19,9 +19,10 @@
 //!    HOME/TMPDIR/LANG passed through if set, a fixed `PATH=/usr/bin:/bin`, the
 //!    policy `env.set` entries, and finally the injected secret var. Nothing
 //!    else is inherited. cwd inherits the caller's; stdin is closed.
-//! 5. **Spawns**, capturing stdout/stderr fully buffered (M5 seam in
-//!    [`crate::output`]), enforcing the timeout (SIGTERM → SIGKILL after a grace
-//!    period), and propagating the child's exit code verbatim (signals as
+//! 5. **Spawns**, capturing stdout/stderr fully buffered, then redacting them
+//!    (invariant 10, in [`crate::output`]: mask the secret and its variant forms,
+//!    fail closed if any survive), enforcing the timeout (SIGTERM → SIGKILL after
+//!    a grace period), and propagating the child's exit code verbatim (signals as
 //!    128+N, shell convention).
 //!
 //! Every path — success or rejection, dry-run or spawn — logs exactly once via
@@ -224,9 +225,6 @@ pub fn run_with(
     }
 
     // ---- spawn path -------------------------------------------------------
-    // The pre-M5 redaction warning is printed for EVERY real execution.
-    let _ = writeln!(emit.err, "{}", output::PRE_M5_REDACTION_WARNING);
-
     match spawn_and_wait(&vault, &args.entry, &policy, &canonical_exe, &argv, opts) {
         Ok(spawned) => emit_spawned(
             emit,
@@ -463,9 +461,10 @@ fn spawn_and_wait(
         )
     })?;
 
-    // The secret is now in the child's environment; drop our copy promptly so it
-    // does not outlive the spawn (it is also zeroized on drop).
-    drop(secret);
+    // The secret is now in the child's environment. We keep our copy alive only
+    // until output redaction has run ([`output::process`] needs it to compute the
+    // variant forms it scans for); it is dropped immediately after, and is
+    // zeroized on drop. It is NEVER stored beyond this function.
 
     // Read stdout/stderr on separate threads so a chatty child cannot deadlock on
     // a full pipe buffer while we wait for exit.
@@ -509,7 +508,11 @@ fn spawn_and_wait(
     let stdout = join_reader(stdout_handle);
     let stderr = join_reader(stderr_handle);
 
-    let processed = output::process(Captured { stdout, stderr }, &policy.output);
+    // Redaction runs here, while the secret is still in scope. `process` exposes
+    // the secret only to compute its variant forms; it stores nothing.
+    let processed = output::process(Captured { stdout, stderr }, &policy.output, &secret);
+    // Done with the secret: drop (and zeroize) it before returning.
+    drop(secret);
     let child_exit_code = exit_code_of(&status);
 
     Ok(Spawned {
@@ -601,7 +604,12 @@ fn emit_spawned(
     argv: &[String],
     spawned: Spawned,
 ) -> Result<Outcome> {
-    let status = if spawned.timed_out {
+    // Status precedence: fail-closed redaction (105) wins over timeout (106) and
+    // success — if secret material survived, the run is a redaction failure
+    // regardless of how the child exited. Timeout then outranks success.
+    let status = if spawned.processed.redaction_failed {
+        KpexecStatus::RedactionFailure
+    } else if spawned.timed_out {
         KpexecStatus::Timeout
     } else {
         KpexecStatus::Success
@@ -618,7 +626,9 @@ fn emit_spawned(
     let out = &spawned.processed;
 
     if args.json {
-        // On timeout, the child_exit_code reflects the killing signal (128+N).
+        // On timeout, the child_exit_code reflects the killing signal (128+N). On
+        // redaction failure the child's real exit code is still reported here,
+        // while stdout/stderr carry only the suppression line (never the secret).
         let envelope = JsonEnvelope {
             kpexec_status: status,
             child_exit_code: Some(child_code),
@@ -627,7 +637,9 @@ fn emit_spawned(
         };
         let _ = writeln!(emit.out, "{}", envelope.to_json());
     } else {
-        // Child streams go to the corresponding kpexec streams verbatim.
+        // Child streams go to the corresponding kpexec streams verbatim. On
+        // fail-closed suppression both `out.stdout` and `out.stderr` are the
+        // single suppression line, so nothing sensitive is emitted.
         let _ = write!(emit.out, "{}", out.stdout);
         let _ = write!(emit.err, "{}", out.stderr);
         if spawned.timed_out {
@@ -635,10 +647,15 @@ fn emit_spawned(
         }
     }
 
-    // Exit code: on a real (non-timeout) execution, propagate the child's code.
-    // On timeout, kpexec reports its own timeout status (106) so the caller can
-    // distinguish "the child chose to exit" from "kpexec killed it".
-    if spawned.timed_out {
+    // Exit-code precedence mirrors the status:
+    // * redaction failure -> the 105 band (defense-in-depth: the run failed even
+    //   though the child may have exited 0);
+    // * timeout -> the 106 band (kpexec killed it, distinguishable from a child
+    //   that chose to exit);
+    // * otherwise -> propagate the child's own exit code verbatim.
+    if spawned.processed.redaction_failed {
+        Ok(Outcome::Kpexec(KpexecStatus::RedactionFailure))
+    } else if spawned.timed_out {
         Ok(Outcome::Kpexec(KpexecStatus::Timeout))
     } else {
         Ok(Outcome::ChildExit(child_code))
