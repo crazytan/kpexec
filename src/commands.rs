@@ -8,7 +8,7 @@
 use crate::cli::{Command, DbCommand, EntryCommand, RunArgs};
 use crate::error::{KpexecError, Result};
 use crate::status::{JsonEnvelope, KpexecStatus, Outcome};
-use crate::{config, doctor};
+use crate::{cmd_check, cmd_entry, cmd_init, config, doctor};
 
 /// Dispatch a parsed command to its handler.
 ///
@@ -18,10 +18,10 @@ use crate::{config, doctor};
 pub fn dispatch(command: Command) -> Result<Outcome> {
     match command {
         Command::Run(args) => run(args),
-        Command::Init(_) => Err(KpexecError::not_implemented("init", 2)),
+        Command::Init(args) => cmd_init::run(args),
         Command::Doctor => doctor_cmd(),
         Command::Entry(sub) => entry(sub),
-        Command::Check(_) => Err(KpexecError::not_implemented("check", 2)),
+        Command::Check(args) => cmd_check::run(args),
         Command::Db(sub) => db(sub),
     }
 }
@@ -54,20 +54,19 @@ fn run(args: RunArgs) -> Result<Outcome> {
 }
 
 fn entry(sub: EntryCommand) -> Result<Outcome> {
-    // All entry subcommands are vault-backed (M2). List/show are read paths but
-    // still need the vault, so they are M2 as well.
-    let feature = match sub {
-        EntryCommand::Add(_) => "entry add",
-        EntryCommand::AddCommand(_) => "entry add-command",
-        EntryCommand::RmCommand(_) => "entry rm-command",
-        EntryCommand::SetSecret(_) => "entry set-secret",
-        EntryCommand::Edit(_) => "entry edit",
-        EntryCommand::Rm(_) => "entry rm",
-        EntryCommand::List(_) => "entry list",
-        EntryCommand::Show(_) => "entry show",
-        EntryCommand::Repin(_) => "entry repin",
-    };
-    Err(KpexecError::not_implemented(feature, 2))
+    // All entry subcommands are vault-backed (M2). List/show are read paths;
+    // the rest mutate the vault and print the pre-M3 mutation warning.
+    match sub {
+        EntryCommand::Add(args) => cmd_entry::add(args),
+        EntryCommand::AddCommand(args) => cmd_entry::add_command(args),
+        EntryCommand::RmCommand(args) => cmd_entry::rm_command(args),
+        EntryCommand::SetSecret(args) => cmd_entry::set_secret(args),
+        EntryCommand::Edit(args) => cmd_entry::edit(args),
+        EntryCommand::Rm(args) => cmd_entry::rm(&args.id),
+        EntryCommand::List(args) => cmd_entry::list(args),
+        EntryCommand::Show(args) => cmd_entry::show(args),
+        EntryCommand::Repin(args) => cmd_entry::repin(args),
+    }
 }
 
 fn db(sub: DbCommand) -> Result<Outcome> {
@@ -85,22 +84,13 @@ mod tests {
     use crate::cli::*;
 
     #[test]
-    fn stubs_return_not_implemented() {
-        let cases: Vec<Command> = vec![
-            Command::Init(InitArgs {
-                db: None,
-                use_existing: false,
-            }),
-            Command::Check(CheckArgs { entry: None }),
-            Command::Entry(EntryCommand::List(EntryListArgs { json: false })),
-            Command::Entry(EntryCommand::Add(EntryAddArgs {
-                id: None,
-                no_pin: false,
-                secret_stdin: false,
-            })),
+    fn db_stubs_still_not_implemented() {
+        // db maintenance stays M3; other M1 stubs are now implemented in M2, so
+        // only the db subcommands remain not-implemented here.
+        for cmd in [
             Command::Db(DbCommand::ShowPassword),
-        ];
-        for cmd in cases {
+            Command::Db(DbCommand::RotatePassword),
+        ] {
             let err = dispatch(cmd).unwrap_err();
             assert_eq!(err.status(), KpexecStatus::NotImplemented);
             assert!(err.message().contains("milestone"));

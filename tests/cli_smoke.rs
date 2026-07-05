@@ -127,24 +127,11 @@ fn unknown_subcommand_is_rejected() {
 }
 
 #[test]
-fn stubbed_commands_return_not_implemented_cleanly() {
-    // Drive dispatch (not process spawn) for the vault-free stubs so we can
-    // assert the structured status rather than just an exit code.
-    let stub_args: &[&[&str]] = &[
-        &["init"],
-        &["check"],
-        &["entry", "add", "github"],
-        &["entry", "add-command", "github"],
-        &["entry", "rm-command", "github", "pr-create"],
-        &["entry", "set-secret", "github"],
-        &["entry", "edit", "github"],
-        &["entry", "rm", "github"],
-        &["entry", "list"],
-        &["entry", "show", "github"],
-        &["entry", "repin", "github"],
-        &["db", "rotate-password"],
-        &["db", "show-password"],
-    ];
+fn db_maintenance_commands_return_not_implemented_cleanly() {
+    // db rotate/show stay M3. The rest of the entry/init/check surface is
+    // implemented in M2 and is exercised via the integration tests against a
+    // temp vault + fake keychain (see tests/vault_lifecycle.rs).
+    let stub_args: &[&[&str]] = &[&["db", "rotate-password"], &["db", "show-password"]];
     for args in stub_args {
         let cli = parse(args).unwrap();
         let err = commands::dispatch(cli.command).unwrap_err();

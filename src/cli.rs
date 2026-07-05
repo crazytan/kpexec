@@ -67,7 +67,7 @@ pub struct RunArgs {
     pub trailing: Vec<String>,
 }
 
-/// `kpexec init [--db <path>] [--use-existing]`
+/// `kpexec init [--db <path>] [--use-existing] [--force]`
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// Vault path to create (default: ~/Secrets/kpexec-agent.kdbx).
@@ -77,6 +77,16 @@ pub struct InitArgs {
     /// Adopt an existing kdbx instead of creating one.
     #[arg(long)]
     pub use_existing: bool,
+
+    /// Overwrite an existing vault/config/Keychain item. Refused otherwise.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Read the existing vault's password from stdin (implies non-interactive;
+    /// used with `--use-existing`). A deliberate extension so `init` is
+    /// scriptable and testable without a TTY.
+    #[arg(long)]
+    pub password_stdin: bool,
 }
 
 /// `kpexec check [--entry <id>]`
@@ -93,16 +103,16 @@ pub enum EntryCommand {
     Add(EntryAddArgs),
 
     /// Append another command template to an existing entry.
-    AddCommand(EntryIdArg),
+    AddCommand(EntryAddCommandArgs),
 
     /// Revoke a single command template from an entry.
     RmCommand(EntryRmCommandArgs),
 
     /// Rotate the stored credential without touching the policy.
-    SetSecret(EntryIdArg),
+    SetSecret(EntrySetSecretArgs),
 
     /// Re-run the wizard fields for an entry.
-    Edit(EntryIdArg),
+    Edit(EntryEditArgs),
 
     /// Remove an entry entirely.
     Rm(EntryIdArg),
@@ -117,7 +127,49 @@ pub enum EntryCommand {
     Repin(EntryRepinArgs),
 }
 
-/// `kpexec entry add [<id>] [--no-pin] [--secret-stdin]`
+/// A single `--command name=<n>,exe=<path>,prefix=<shell words>` value.
+///
+/// Command templates may be supplied non-interactively via repeated
+/// `--command` flags (a deliberate extension so tests/scripts run without a
+/// TTY). Format is comma-separated `key=value` pairs; `prefix` uses shell-word
+/// quoting so commas inside a quoted arg are preserved by splitting on the
+/// first `=` per key. Recognized keys: `name`, `exe`, `prefix`.
+#[derive(Debug, Clone)]
+pub struct CommandSpec {
+    /// The command name.
+    pub name: String,
+    /// The absolute executable path.
+    pub exe: String,
+    /// The raw prefix string (shell-word parsed downstream).
+    pub prefix: String,
+}
+
+impl std::str::FromStr for CommandSpec {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut name = None;
+        let mut exe = None;
+        let mut prefix = String::new();
+        for part in s.split(';') {
+            let (k, v) = part
+                .split_once('=')
+                .ok_or_else(|| format!("expected key=value in {part:?}"))?;
+            match k.trim() {
+                "name" => name = Some(v.to_string()),
+                "exe" => exe = Some(v.to_string()),
+                "prefix" => prefix = v.to_string(),
+                other => return Err(format!("unknown command key {other:?}")),
+            }
+        }
+        Ok(CommandSpec {
+            name: name.ok_or("command spec missing name=")?,
+            exe: exe.ok_or("command spec missing exe=")?,
+            prefix,
+        })
+    }
+}
+
+/// `kpexec entry add [<id>] [--no-pin] [--secret-stdin] [wizard overrides]`
 #[derive(Debug, Args)]
 pub struct EntryAddArgs {
     /// Optional entry id; prompted for if omitted.
@@ -130,6 +182,73 @@ pub struct EntryAddArgs {
     /// Read the secret from stdin instead of an interactive prompt.
     #[arg(long)]
     pub secret_stdin: bool,
+
+    /// Non-interactive: entry description.
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// Non-interactive: the KeePass Title (display label). Defaults to the id.
+    #[arg(long)]
+    pub title: Option<String>,
+
+    /// Non-interactive: the env var name to inject the secret as.
+    #[arg(long)]
+    pub inject: Option<String>,
+
+    /// Non-interactive: repeatable command template
+    /// (`name=..;exe=..;prefix=..`).
+    #[arg(long = "command", value_name = "SPEC")]
+    pub commands: Vec<CommandSpec>,
+
+    /// Refuse to overwrite an existing entry with the same id unless set.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `kpexec entry add-command <id> [wizard overrides]`
+#[derive(Debug, Args)]
+pub struct EntryAddCommandArgs {
+    /// The entry id.
+    pub id: String,
+
+    /// Skip executable pinning for the new command.
+    #[arg(long)]
+    pub no_pin: bool,
+
+    /// Non-interactive: repeatable command template
+    /// (`name=..;exe=..;prefix=..`).
+    #[arg(long = "command", value_name = "SPEC")]
+    pub commands: Vec<CommandSpec>,
+}
+
+/// `kpexec entry set-secret <id> [--secret-stdin]`
+#[derive(Debug, Args)]
+pub struct EntrySetSecretArgs {
+    /// The entry id.
+    pub id: String,
+
+    /// Read the new secret from stdin instead of a hidden prompt.
+    #[arg(long)]
+    pub secret_stdin: bool,
+}
+
+/// `kpexec entry edit <id> [wizard overrides]`
+#[derive(Debug, Args)]
+pub struct EntryEditArgs {
+    /// The entry id.
+    pub id: String,
+
+    /// Non-interactive: new description.
+    #[arg(long)]
+    pub description: Option<String>,
+
+    /// Non-interactive: new KeePass Title.
+    #[arg(long)]
+    pub title: Option<String>,
+
+    /// Non-interactive: new inject env var name.
+    #[arg(long)]
+    pub inject: Option<String>,
 }
 
 /// A bare `<id>` positional, shared by several entry subcommands.
