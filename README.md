@@ -21,3 +21,7 @@ Policies and secrets live in a dedicated KDBX4 vault managed entirely by kpexec 
 - [Security design](docs/security-design.md) — guarantees, trust model, invariants, residual risks
 - [CLI design](docs/cli-design.md) — data model, KDBX mapping, subcommands, agent contract
 - [Milestones](docs/milestones.md) — de-risking spikes, implementation milestones, acceptance tests
+
+## License
+
+kpexec is licensed under [GPL-3.0-only](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution terms, including DCO sign-off and the license grant.
