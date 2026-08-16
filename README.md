@@ -20,25 +20,32 @@ remain openable in KeePassXC. kpexec is currently macOS-only.
 kpexec is an experimental, pre-release implementation. The CLI, KDBX vault
 lifecycle, executable pinning, policy checks, constrained subprocess runner,
 output redaction, the LocalAuthentication user-presence gate, and the vault
-password maintenance commands are implemented. Platform hardening remains
-incomplete:
+password maintenance commands and platform credential boundary are implemented.
+The platform behavior has been supervised on macOS 26.6.1. The original probes
+were signed too broadly; the current isolated Apple Development harnesses must
+be rerun before their results count as ship evidence:
 
 - every vault mutation and recovery-password display is gated by Touch ID or
-  the macOS account-password fallback, but the interactive GUI behavior still
-  needs supervised validation;
-- production Keychain credential access intentionally fails closed until the
-  signed-identity ACL/partition-list provisioning workflow is supervised and
-  verified;
-- release signing, hardened runtime, notarization, and the corresponding
-  release validation are still pending.
+  the macOS account-password fallback; the signed production path has been
+  supervised successfully with account-password approval and fail-closed SSH
+  rejection before any GUI sheet;
+- production Keychain credential access now verifies the exact signed identity
+  and singleton Team-ID partition before reading or updating the same item
+  reference; historical planted-item and Rust lifecycle runs passed, with a
+  safe isolated-profile rerun still required for ship evidence;
+- release packaging, notarization, and clean-account acceptance are still
+  pending.
 
-Until those protections land, a locally built binary must not be treated as a
-complete security boundary against an untrusted local agent. See
+Until a notarized release artifact passes the remaining ship gates, a locally
+built binary must not be treated as a complete security boundary against an
+untrusted local agent. See
 [Milestones](docs/milestones.md) for the remaining supervised acceptance work.
 
 ## Requirements
 
-- macOS
+- Apple silicon Mac (the initial package targets macOS 11, but that minimum
+  still requires release-candidate runtime validation before it is advertised
+  as supported)
 - Rust 1.96 or newer
 - Xcode Command Line Tools
 
@@ -62,16 +69,15 @@ To put the locally built binary on Cargo's bin path:
 cargo install --path . --locked
 ```
 
-Both commands produce an unsigned development build with the platform
-hardening limitations listed above; there is not yet a hardened release
-artifact.
+Both commands produce an unsigned development build. The production Keychain
+backend rejects it because it does not satisfy kpexec's exact Developer ID
+requirement; there is not yet a notarized release artifact.
 
 ## Basic use
 
-The workflow below is the intended CLI flow. In the current pre-release build,
-production vault access stops at the fail-closed Keychain ACL check described
-above; the commands become operational only after that provisioning boundary is
-validated and enabled.
+The workflow below is the intended CLI flow. Unsigned local builds intentionally
+fail the production Keychain identity check; use the release signing workflow for
+an end-to-end local validation. No notarized release artifact is published yet.
 
 Initialize the dedicated vault, then use the entry wizard to store a credential
 and define one or more allowed command templates:

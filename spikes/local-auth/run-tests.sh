@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# Validate LocalAuthentication for the signed, hardened kpexec release model.
+# Validate LocalAuthentication through the hardened kpexec implementation.
 #
 # Safe mode (never executes LocalAuthentication or uses the signing private key):
 #   ./run-tests.sh --check-only
 #
-# Prompt-bearing supervised mode (signs, then runs GUI + SSH legs in one session):
+# Prompt-bearing supervised mode (Apple-Development-signs an isolated probe, then
+# runs GUI + SSH legs in one session):
 #   ./run-tests.sh --supervised
 #
 # Production probe exit codes: 0=authorized, 1=denied, 2=unavailable, 3=internal.
 
 set -euo pipefail
 
-IDENTITY="${KPEXEC_SIGNING_IDENTITY:-Developer ID Application: Jia Tan (V82M9YX8BR)}"
-IDENTIFIER="${KPEXEC_IDENTIFIER:-dev.crazytan.kpexec}"
-TEAM_ID="${KPEXEC_TEAM_ID:-V82M9YX8BR}"
+readonly IDENTITY="Apple Development: Jia Tan (ZW5U6862Q8)"
+readonly IDENTIFIER="dev.crazytan.kpexec.local-auth.spike"
+readonly TEAM_ID="V82M9YX8BR"
+readonly DEVELOPMENT_REQUIREMENT="identifier \"$IDENTIFIER\" and anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.2] exists and certificate leaf[field.1.2.840.113635.100.6.1.12] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
+readonly PRODUCTION_REQUIREMENT="identifier \"dev.crazytan.kpexec\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
@@ -43,10 +46,11 @@ usage: $0 --check-only | --supervised
 
   --check-only   Type-check and compile the probe, inspect prerequisites, and
                  test noninteractive localhost SSH readiness. Never uses the
-                 Developer ID private key or executes the probe, so it cannot
+                 signing private key or executes the probe, so it cannot
                  present LocalAuthentication UI.
 
-  --supervised   Repeat the safe checks, sign with Developer ID + hardened
+  --supervised   Repeat the safe checks, sign the isolated probe with Apple
+                 Development + hardened
                  runtime, run the interactive approval leg, then run the same
                  binary through non-TTY localhost SSH. A human must watch the
                  screen and answer the observation questions.
@@ -144,7 +148,8 @@ safe_checks() {
 
     echo
     echo "== Swift reference type-check (no LocalAuthentication execution) =="
-    run /usr/bin/swiftc -typecheck -framework LocalAuthentication "$SRC"
+    run /usr/bin/swiftc -typecheck \
+        -framework LocalAuthentication -framework Security "$SRC"
 
     echo
     echo "== production Rust/Objective-C probe build + linkage =="
@@ -191,20 +196,32 @@ safe_checks() {
     identity_output="$(/usr/bin/security find-identity -v -p codesigning)"
     printf '%s\n' "$identity_output"
     if ! grep -Fq "$IDENTITY" <<<"$identity_output"; then
-        echo "FAIL: required Developer ID identity is not available." >&2
+        echo "FAIL: required Apple Development identity is not available." >&2
         return 1
     fi
-    echo "PASS: required Developer ID identity is listed."
+    echo "PASS: required Apple Development identity is listed."
 
     check_ssh
 }
 
 sign_and_verify() {
     echo
-    echo "== Developer ID sign + strict verification =="
+    echo "== isolated Apple Development sign + strict verification =="
     echo ">>> This step uses the signing private key and may require Keychain approval."
-    KPEXEC_SIGNING_IDENTITY="$IDENTITY" KPEXEC_TEAM_ID="$TEAM_ID" \
-        "$HERE/../signing/sign.sh" "$BIN" "$IDENTIFIER"
+    run /usr/bin/codesign --force --timestamp=none --options runtime \
+        --identifier "$IDENTIFIER" --sign "$IDENTITY" "$BIN"
+    run /usr/bin/codesign --verify --strict --verbose=2 \
+        -R="$DEVELOPMENT_REQUIREMENT" "$BIN"
+    signature="$(/usr/bin/codesign --display --verbose=4 "$BIN" 2>&1)"
+    grep -Fq "Identifier=$IDENTIFIER" <<<"$signature"
+    grep -Fq "TeamIdentifier=$TEAM_ID" <<<"$signature"
+    grep -Eq '^CodeDirectory .* flags=.*\(runtime\)' <<<"$signature"
+    if /usr/bin/codesign --verify --strict \
+        -R="$PRODUCTION_REQUIREMENT" "$BIN" >/dev/null 2>&1; then
+        echo "FAIL: LocalAuthentication probe satisfies the production requirement" >&2
+        return 1
+    fi
+    echo "PASS: LocalAuthentication probe cannot satisfy the production Developer ID requirement."
 }
 
 record_results() {
@@ -320,7 +337,7 @@ case "$1" in
     --check-only)
         safe_checks
         echo
-        echo "PASS: non-prompting checks complete. No Developer ID key was used and no probe ran."
+        echo "PASS: non-prompting checks complete. No signing key was used and no probe ran."
         echo "Next, with a human watching the console, run:"
         echo "  $0 --supervised"
         ;;

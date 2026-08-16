@@ -44,6 +44,30 @@ jobs:
       - name: Test all targets
         run: cargo test --locked --all-targets --all-features
 
+      - name: Prove supervised Keychain profile isolation
+        if: matrix.rust == 'stable'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo build --release --locked --example keychain_backend_probe 2>/dev/null; then
+            echo "backend probe unexpectedly built without supervised-probes" >&2
+            exit 1
+          fi
+          cargo build --release --locked --features supervised-probes \
+            --example keychain_backend_probe
+          cargo test --locked --features supervised-probes \
+            development_probe_cannot_enter_production_trust_domain
+          cargo test --locked --features supervised-probes \
+            development_probe_refuses_production_accounts
+          set +e
+          ./spikes/signing/sign.sh >/dev/null 2>&1
+          signer_rc=$?
+          set -e
+          if [[ "$signer_rc" -ne 64 ]]; then
+            echo "legacy arbitrary-binary signer did not fail closed (rc=$signer_rc)" >&2
+            exit 1
+          fi
+
       - name: Test release profile
         if: matrix.rust == 'stable'
         run: cargo test --release --locked --all-targets --all-features
@@ -107,6 +131,8 @@ jobs:
           set -euo pipefail
           scripts=(
             scripts/release.sh
+            scripts/test-release.sh
+            spikes/keychain-acl/run-backend-test.sh
             spikes/keychain-acl/run-tests.sh
             spikes/local-auth/run-tests.sh
             spikes/signing/notarize.sh
@@ -115,15 +141,25 @@ jobs:
           bash -n "${scripts[@]}"
           shellcheck "${scripts[@]}"
 
+      - name: Test release verifier defenses
+        if: matrix.rust == 'stable'
+        run: ./scripts/test-release.sh
+
       - name: Type-check macOS spike probes and verify production auth linkage
         if: matrix.rust == 'stable'
         shell: bash
         run: |
           set -euo pipefail
           /usr/bin/swiftc -typecheck -framework Security spikes/keychain-acl/kcprobe.swift
-          /usr/bin/swiftc -typecheck -framework LocalAuthentication spikes/local-auth/laprobe.swift
+          /usr/bin/swiftc -typecheck -framework LocalAuthentication -framework Security spikes/local-auth/laprobe.swift
+          /usr/bin/clang -fsyntax-only -fobjc-arc -Wall -Wextra -Werror src/user_presence_shim.m
           cargo build --release --locked --bin kpexec --example user_presence_probe
           otool -L target/release/examples/user_presence_probe | grep -F '/LocalAuthentication.framework/'
           nm -gU target/release/examples/user_presence_probe | grep -F '_kpexec_authorize_user_presence'
           otool -L target/release/kpexec | grep -F '/LocalAuthentication.framework/'
           nm -gU target/release/kpexec | grep -F '_kpexec_authorize_user_presence'
+
+      - name: Rehearse unsigned release preparation
+        if: matrix.rust == 'stable'
+        shell: bash
+        run: ./scripts/release.sh prepare "$RUNNER_TEMP/kpexec-release"

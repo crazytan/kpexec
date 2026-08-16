@@ -11,7 +11,7 @@
 // HUMAN observation — run-tests.sh pauses and tells the observer exactly what to watch.
 //
 // Build:  swiftc -framework Security -o kcprobe kcprobe.swift
-// Sign:   see run-tests.sh (Developer ID, hardened runtime, identifier dev.crazytan.kpexec)
+// Sign:   see run-tests.sh (Apple Development, isolated .spike identifier)
 //
 // Subcommands:
 //   create <service> <account> <value>   SecItemAdd a generic password

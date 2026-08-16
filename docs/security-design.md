@@ -1,9 +1,13 @@
 # kpexec — Security Design (condensed)
 
 > **Implementation status:** The LocalAuthentication gate and fail-closed
-> Keychain ACL verification are implemented. Production credential access
-> remains unavailable until supervised ACL provisioning validates the required
-> binding. Release signing, hardened runtime, and notarization are not complete.
+> Keychain ACL verification are implemented. The supervised Keychain matrix
+> passed on macOS 26.6.1: genuine creation received the Team-ID partition,
+> differently signed and planted items were denied, and a same-identity rebuild
+> retained silent access. Those historical runs used the Developer ID identity
+> on mutable probes and must be repeated with the isolated Apple Development
+> harnesses before shipping. Release signing, notarization, and clean-artifact
+> acceptance are not complete.
 > See the [README](../README.md#status) before relying on kpexec as a complete
 > security boundary.
 
@@ -31,8 +35,28 @@
 - The vault master password is stored in the login Keychain with an ACL/partition list bound to a **code signing requirement: the developer's Team ID plus the identifier `dev.crazytan.kpexec`**. The genuine, Developer ID–signed kpexec binary reads it silently (so `run` stays unattended); any other process triggers a macOS confirmation dialog, which a terminal-bound agent cannot answer and an absent user will not.
 - Team ID (not the leaf certificate) is the anchor: it survives certificate renewal and kpexec updates without re-prompting. The identifier scoping prevents *other* binaries signed by the same developer from inheriting access.
 - Every mutating subcommand (`init`, `entry add/add-command/rm-command/edit/rm/set-secret`, `db rotate-password`, `db show-password`) requires a LocalAuthentication user-presence check before touching the vault, with a prompt that summarizes the change.
-- **Vault identity binding (anti-substitution):** the protected item's value is `{password, db_path}` — the trust anchor names *which vault* is blessed, not just its password. `config.toml` is agent-writable and treated as an untrusted hint; kpexec never opens a vault the protected item doesn't name. This blocks the substitution attack where an agent plants its own kdbx + config edit. The remaining prerequisite — an agent-*created* Keychain item must not be silently readable by kpexec (partition lists require the login password to mint a `teamid:`-trusted item) — is a mandatory milestone-zero validation, not an assumption.
-- **Distribution requirements** for the gate to be real: release binaries must be Developer ID–signed with **hardened runtime** (blocks ptrace/dylib injection into the process holding the password in memory) and notarized. Self-built binaries get a different signature per build; they fall back to prompt-per-access or "Always Allow," which voids the protection — the docs must say so.
+- macOS may route LocalAuthentication UI requested by an SSH process to the active
+  console. Before creating `LAContext`, kpexec reads the caller's kernel Security-session
+  attributes and rejects remote or non-graphical sessions. Failure to inspect the
+  session also rejects. This prevents a direct headless invocation from summoning a
+  misleading approval sheet on the console.
+- **Vault identity binding (anti-substitution):** the protected item's value is `{password, db_path}` — the trust anchor names *which vault* is blessed, not just its password. `config.toml` is agent-writable and treated as an untrusted hint; kpexec never opens a vault the protected item doesn't name. This blocks the substitution attack where an agent plants its own kdbx + config edit. Before reading or updating the value, the production backend validates the running code against the exact Developer-ID Team + identifier requirement, obtains an item reference without requesting data, and requires exactly one partition ACL whose property list is the singleton `teamid:V82M9YX8BR`. Partition entries are an OR allow-list, so any extra entry also fails. It then reads or updates that same reference; securityd enforces the ordinary designated-requirement ACL before returning protected bytes. An absent, duplicate, malformed, `apple-tool:`, or wrong-team partition fails closed without bringing the protected bytes into the process.
+- **Create-to-reference race:** modern `SecItemAdd` creates the generic password without
+  returning a usable legacy item reference, so kpexec resolves the reference in a second,
+  attribute-only query. It never trusts creation alone: the resolved reference must pass
+  the full ACL check, and all later access stays on that retained reference. A racer can
+  cause a duplicate, disappearance, or wrong-partition result, but each fails before a
+  read. If reference resolution fails after successful creation, kpexec performs
+  best-effort exact-service/account cleanup rather than stranding the credential.
+- **Distribution requirements** for the gate to be real: release binaries must be Developer ID–signed with **hardened runtime** (blocks ptrace/dylib injection into the process holding the password in memory) and notarized. Self-built, ad-hoc, wrong-identifier, or wrong-team binaries are rejected by kpexec's own code-signing requirement before Keychain data access; the Keychain's ordinary application ACL is a second enforcement layer.
+- **Signing-oracle isolation:** mutable workspace code is never signed into the
+  production Developer ID trust domain. T1–T4 and LocalAuthentication use fixed
+  Apple Development identities plus isolated `.spike` identifiers. T5 is absent
+  from default builds and uses a feature-gated backend type whose Apple Development
+  certificate OIDs, isolated service/identifier, and `backend-spike:` account prefix
+  are compile-time constants. No environment variable or runtime branch can switch
+  it to `MacKeychain`; the exact signed probe is also required to fail the production
+  code requirement. Developer ID signing is reserved for a staged release artifact.
 - **Recovery:** `init` prints the generated master password once as a recovery key, with instructions to store it *outside the agent's reach* (personal password manager or paper — never a file in a repo or home directory). `kpexec db show-password` (Touch ID–gated) re-displays it while the Keychain item is intact. Without either, a lost Keychain means an unrecoverable vault and rotating every token in it.
 
 ## Invariants
@@ -44,7 +68,8 @@
 5. **Pinned executables** — the policy stores the SHA-256 of the canonical executable's bytes, computed at authoring time; `run` re-hashes before exec and rejects on mismatch. Because macOS has no public descriptor-based exec, kpexec accepts a pin only when the canonical file and every ancestor are neither writable nor owned by the current user, closing the same-UID hash-to-exec race. Authoring and `repin` reject unenforceable paths, while `check` and `run` fail closed on legacy or hand-edited policies. Legitimate upgrades go through the Touch ID–gated `entry repin`. Unpinned commands require an explicit `--no-pin` opt-out and are flagged by `check` and `doctor`.
 6. **Env-only injection** — the secret enters exactly one place: a named env var in the child's environment. No stdin/argv/file/template injection.
 7. **Defined minimal child environment** — the child gets exactly: `HOME`, `TMPDIR`, `LANG`, a minimal `PATH` (`/usr/bin:/bin`), any non-secret variables in the policy's `env.set` block, and the injected secret. Nothing else is inherited — no proxy vars, no `NODE_OPTIONS`, no stray credentials. The child inherits the caller's cwd and gets a closed stdin.
-8. **User presence for mutation** — no vault write without a LocalAuthentication check (see *Vault access control*).
+8. **User presence for mutation** — no vault write without a successful local graphical
+   Security-session preflight and LocalAuthentication check (see *Vault access control*).
 9. **Secret hygiene** — secrets held in zeroizing wrapper types; never logged; never echoed by kpexec; the Keychain holds only the vault unlock password, never the brokered secrets.
 10. **Unconditional output redaction (defense-in-depth, not a boundary)** — subprocess pipes are drained to EOF while only a bounded prefix (policy cap plus encoded-secret look-ahead) is retained. Before deferred emission, that prefix is scanned for the exact secret plus JSON-escaped, shell-escaped, and URL-encoded forms and truncated at the policy cap. Redaction cannot be disabled by policy. If secret material is still detected after replacement, all output is suppressed and the run fails.
 11. **Policy integrity** — policies live inside the encrypted, ACL-protected kdbx; malformed policy, unknown fields, or duplicate ids ⇒ the run is rejected.

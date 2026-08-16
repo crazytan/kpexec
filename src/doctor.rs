@@ -15,14 +15,13 @@ use std::process::Command;
 use crate::cmd_check;
 use crate::config::{self, Config};
 use crate::error::Result;
-use crate::keychain::{AclBinding, KeychainStore, account_for};
+use crate::keychain::{
+    AclBinding, EXPECTED_IDENTIFIER, EXPECTED_TEAM_ID, KeychainStore, account_for,
+};
 use crate::paths;
 use crate::policy::Policy;
 use crate::status::KpexecStatus;
 use crate::vault::Vault;
-
-const EXPECTED_IDENTIFIER: &str = "dev.crazytan.kpexec";
-const EXPECTED_TEAM_ID: &str = "V82M9YX8BR";
 
 /// Severity of a single doctor check line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,13 +207,13 @@ pub fn run_full_with(
     let acl_verified = match keychain.acl_binding(&account) {
         Ok(AclBinding::Verified) => {
             checks.push(Check::ok(
-                "Keychain item has the required Team-ID + identifier ACL binding",
+                "Keychain item has the singleton creator Team-ID partition and the current executable has the exact release identity",
             ));
             true
         }
         Ok(AclBinding::Unverified) => {
             checks.push(Check::fail(
-                "Keychain ACL binding is unverified; protected credential read refused (run the supervised T1-T4 provisioning workflow)",
+                "Keychain ACL provenance is absent or is not the singleton release Team-ID partition; protected credential read refused",
             ));
             false
         }
@@ -729,7 +728,7 @@ TeamIdentifier=V82M9YX8BR\n";
         );
         assert_eq!(store.gets.get(), 0);
         assert!(report.checks.iter().any(|check| {
-            check.level == Level::Fail && check.message.contains("ACL binding is unverified")
+            check.level == Level::Fail && check.message.contains("ACL provenance is absent")
         }));
     }
 
