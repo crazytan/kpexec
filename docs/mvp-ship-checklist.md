@@ -1,109 +1,80 @@
 # MVP ship checklist
 
-The automated Rust implementation is green, and the supervised macOS credential
-boundary has passed. Shipping remains blocked by the notarized release pipeline,
-clean-account installation, and final acceptance pass.
+The implementation and release pipeline have passed a substantial pre-final
+acceptance run. The exact evidence and hashes are recorded in [v0.1.0 release
+evidence](release-evidence-v0.1.0.md). Do not publish the existing package: it
+was built from `47bd556` with a macOS 11 deployment target and is evidence for
+the pipeline, not the final macOS 15 release candidate.
 
-## 1. Validate the platform assumptions with a human present
+## Completed baseline
 
-The historical supervised spikes passed, but used an unsafe Developer ID signing
-path for mutable probes. That path is removed. Re-run the isolated Apple Development
-harnesses on the release candidate in this order, recording every prompt and exit code in
-[`spikes/README.md`](../spikes/README.md):
+- Protected `main` CI run `31970889228` passed the required Rust 1.96.0 and
+  stable jobs at `47bd556`.
+- The safe isolated Keychain T1–T5 and LocalAuthentication interactive/SSH
+  matrices passed at `a11564c` on macOS 26.6.1. These results remain applicable
+  only while the tested Keychain, LocalAuthentication, identity, and signing
+  boundaries are unchanged.
+- A clean package from `47bd556` was Developer ID signed, notarized, stapled,
+  Gatekeeper accepted, installed, and matched byte-for-byte to its packaged
+  executable. Production initialization and `doctor` passed.
+- The installed candidate rejected a denied mutation without changing the
+  observed vault, config, entry, or backup state; rejected stale pinned bytes
+  before spawn; restored operation after an approved repin; and emitted the
+  expected rollback audit record.
+- A live one-day, repository-scoped GitHub token with zero optional permissions
+  completed the pinned `gh` demo. Normal/JSON output and artifact/log scans
+  found no token disclosure.
 
-1. `spikes/keychain-acl/run-tests.sh` — T1–T4, especially the planted-item
-   anti-substitution test and same-identity upgrade behavior.
-2. `spikes/keychain-acl/run-backend-test.sh` — T5, the feature-gated Apple
-   Development profile of the Rust backend on a unique synthetic account.
-3. `spikes/local-auth/run-tests.sh --check-only` — resolve every non-prompting
-   prerequisite, including BatchMode localhost SSH. Then run
-   `spikes/local-auth/run-tests.sh --supervised` once: approve the interactive
-   production-path probe and require `UNAVAILABLE` with no GUI sheet over SSH.
-4. Only after release preparation has produced the reviewed staged artifact,
-   run the release signing stage and confirm Team ID `V82M9YX8BR`, identifier
-   `dev.crazytan.kpexec`, and hardened runtime. Never Developer-ID-sign a
-   mutable workspace probe.
+## Final release-candidate gates
 
-Any unexpected silent Keychain read, successful SSH authorization, or new
-prompt after a same-identity upgrade is a design blocker.
+1. Merge the macOS 15 deployment-target and final test/documentation changes.
+   Require the exact `Rust 1.96.0` job on `macos-15` and `Rust stable` job on
+   `macos-26` to pass on protected `main`.
+2. From that clean commit, run the full [release runbook](release.md). Record the
+   final commit, CI run, notarization result, package SHA-256, and extracted
+   executable SHA-256 in the draft GitHub Release record.
+3. Require the full automated release-candidate suite to execute on the hosted
+   macOS 15 arm64 runner before advertising macOS 15 support. Record the
+   human-present Keychain and LocalAuthentication checks on a supported macOS
+   release (macOS 26.6.1 for v0.1.0); headless hosted CI cannot validate their
+   GUI prompt observations. Rerun them whenever the corresponding security
+   boundary, signing identity, or relevant platform behavior changes.
+4. Install the exact final package on a clean macOS 15 account. Confirm the
+   receipt/version, root ownership and modes, exact signature requirement,
+   initialized `doctor` result, and byte equality with the extracted payload.
+5. Run A1–A16 against the final candidate. Automated tests may supply synthetic
+   evidence, but A12–A15 retain their supervised macOS observations. Repeat the
+   disposable-token demo if the run path, redactor, policy parser, or packaged
+   executable changed after the recorded demonstration.
+6. Create a signed `v0.1.0` tag, publish the `.pkg`, `SHA256SUMS`, license, and
+   matching source archive, then download and independently verify the
+   published package before announcing it.
 
-## 2. Production Keychain backend (complete)
+## Acceptance details
 
-`MacKeychain` implements the T1–T5 boundary. Historical runs exercised it, but
-only a fresh pass with the isolated Apple Development harness counts as current
-ship evidence:
+Pinned executables must use an admin-owned, non-writable canonical path.
+Homebrew installations are commonly user-owned and are not suitable directly.
+The final demonstration must prove that authoring/repin accepts the privileged
+path, changed bytes cause `exe-hash-mismatch` without a spawn, and an approved
+repin restores execution. `--no-pin` is development-only.
 
-- automatic creator partition provisioning during `init`, with post-create
-  verification and exact-account rollback on failure;
-- a non-secret `acl_binding` inspection that proves the Team ID + identifier
-  binding before `get` reads credential bytes;
-- rollback when ACL provisioning, Keychain storage, or config writing fails;
-- A13–A15: other signer rejected, planted item rejected, and a same-identity
-  upgrade reads silently.
+For A12, denial or unavailable graphical authentication must leave the vault,
+config, backup, and Keychain state unchanged. T1–T5 cover silent genuine reads,
+different-signer rejection, same-identity upgrades, planted-item rejection, and
+the production Rust Keychain lifecycle. The LocalAuthentication SSH leg must
+return unavailable before presenting a GUI sheet. A16 documents rather than
+prevents vault rollback and therefore requires the expected audit line.
 
-Re-run T1–T5 on the release candidate and minimum supported macOS before shipping.
-
-## 3. Merge a green release commit
-
-The required Rust 1.96.0 and stable jobs automate formatting, Clippy with
-warnings denied, debug and release tests, Rustdoc, dependency audits, shell
-linting, macOS probe type checks and framework linkage, and a complete unsigned
-release preparation rehearsal. A1–A11 use temporary vaults and a fake Keychain;
-they need no production credentials.
-
-The initial MVP artifact is Apple silicon only (`aarch64-apple-darwin`) with a
-macOS 11.0 deployment target. Runtime validation on macOS 11 hardware or a VM is
-still required before advertising that minimum; otherwise raise the minimum to
-the oldest version exercised by the release candidate.
-
-## 4. Provide an enforceable executable-pin path
-
-Pinned executables must be under an admin-owned, non-writable canonical path.
-Homebrew installations are commonly user-owned and will be rejected. For the
-MVP demo, install the exact `gh` binary into a root-owned location (or ship an
-equivalent privileged installation recipe), then verify:
-
-- authoring and `repin` accept the path;
-- byte tampering produces `exe-hash-mismatch` without executing;
-- replacing any path component is unavailable to the agent account.
-
-Using `--no-pin` is useful for development but is not an acceptable substitute
-for the pinned MVP demonstration.
-
-## 5. Build and validate the release artifact
-
-Follow the [release runbook](release.md). `scripts/release.sh` automates the
-local release gates, clean-source rebuild comparison, staging, exact Developer
-ID signing verification, hardened runtime and timestamp checks, `.pkg`
-construction, extracted-payload inspection, submission, stapling, Gatekeeper
-assessment, and checksums. Signing and notarization are explicit credentialed
-stages; preparation does neither.
-
-Then install the package on a clean macOS account and rerun `kpexec doctor`.
-The clean-account install, credential prompts, and Apple submission verdict
-remain human gates. An installed bare CLI may produce doctor's not-applicable
-Gatekeeper warning (`code is valid but does not seem to be an app`); accept
-that warning only when the exact installer package has passed the runbook's
-staple validation and `spctl --type install` assessment.
-
-## 6. Run the final acceptance pass
-
-On the installed artifact:
-
-- deny each mutation prompt and prove no vault, config, backup, or Keychain
-  state changes (A12);
-- rerun Keychain substitution/signer/upgrade tests (A13–A15);
-- restore an older vault and confirm the expected audit line exists (A16);
-- perform the end-to-end `gh` demo with a disposable, minimally scoped token;
-- grep terminal output, JSON, logs, and temporary artifacts for the token;
-- exercise init, add, dry-run, real run, tampered binary, repin, timeout,
-  rotation, recovery display, and uninstall/reinstall upgrade behavior.
+An installed bare CLI may produce doctor's not-applicable Gatekeeper warning
+(`code is valid but does not seem to be an app`). That warning neither blocks
+the gate nor proves notarization. The exact installer must pass staple
+validation and `spctl --type install`, and the installed bytes must match the
+verified package payload.
 
 ## Ship gate
 
-Ship only when CI is required on protected `main`, T1–T5 and the LocalAuth SSH
-leg are recorded as passing, the production Keychain boundary still passes on
-the release candidate, the exact notarized installer package passes Gatekeeper
-on a clean account, and A1–A16 plus the disposable-token demo are green. A bare
-CLI executable's not-applicable Gatekeeper warning neither blocks this gate nor
-substitutes for package verification.
+Ship only when every final-candidate item above is recorded as passing in the
+draft GitHub Release record, protected `main` is green, the signed tag identifies
+the exact recorded commit, and independently downloaded draft artifacts verify
+against the checksums. Publish that verified draft without rebuilding or
+substituting any asset.

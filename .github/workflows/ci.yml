@@ -9,6 +9,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  MACOSX_DEPLOYMENT_TARGET: "15.0"
   # Keep the hostile ambient setting that originally suppressed audit records;
   # the suite proves the dedicated audit target remains unsuppressible.
   RUST_LOG: warn
@@ -16,14 +17,16 @@ env:
 jobs:
   test:
     name: Rust ${{ matrix.rust }}
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        rust:
-          - 1.96.0
-          - stable
+        include:
+          - rust: 1.96.0
+            os: macos-15
+          - rust: stable
+            os: macos-26
 
     steps:
       - name: Check out repository
