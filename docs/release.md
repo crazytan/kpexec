@@ -8,6 +8,9 @@ and notarization will not submit anything unless explicitly enabled.
 ## Prerequisites
 
 - A clean, reviewed commit whose Rust 1.96 and stable CI jobs passed.
+- An Apple silicon Mac running macOS 11 or newer. The initial MVP artifact is
+  intentionally `aarch64-apple-darwin` with a macOS 11.0 deployment target;
+  Intel and universal packages require later build-and-hardware validation.
 - Xcode Command Line Tools, Rust 1.96 or newer, and the locked dependencies.
 - For the credentialed stages, `Developer ID Application` and `Developer ID
   Installer` identities for Team ID `V82M9YX8BR` in the login Keychain.
@@ -17,9 +20,12 @@ and notarization will not submit anything unless explicitly enabled.
   ```sh
   xcrun notarytool store-credentials kpexec-notary \
     --apple-id "<apple-id>" \
-    --team-id V82M9YX8BR \
-    --password "<app-specific-password>"
+    --team-id V82M9YX8BR
   ```
+
+  Omit `--password` so `notarytool` requests the app-specific password through
+  its secure interactive prompt instead of placing it in shell history or the
+  process argument list.
 
 ## 1. Prepare without credentials
 
@@ -36,12 +42,10 @@ unsigned binary under `stage/usr/local/bin/kpexec`, includes the license and
 README under `stage/usr/local/share/doc/kpexec`, and records its version,
 target, commit, and checksum. Review `RELEASE.env` and
 `SHA256SUMS.unsigned`. `ALLOW_DIRTY=1` exists only for rehearsals; an artifact
-with `DIRTY=1` must not ship.
+with `DIRTY=1` cannot enter a credentialed stage.
 
-One preparation run produces a package for the active Rust host target, recorded
-in `RELEASE.env`; it does not create a universal binary. Before the first public
-release, document the supported CPU target(s) and minimum macOS version, and
-repeat this workflow on each supported target as needed.
+The script records and verifies the architecture and deployment target. It does
+not create a universal binary.
 
 ## 2. Sign and package with a human present
 
@@ -49,10 +53,14 @@ repeat this workflow on each supported target as needed.
 KPEXEC_SIGN=1 ./scripts/release.sh sign-package dist/kpexec-0.1.0
 ```
 
-This is the first credentialed stage. It signs the staged binary with a secure
-timestamp, identifier `dev.crazytan.kpexec`, and hardened runtime; verifies the
-identifier, Team ID, timestamp, and runtime flag; then creates and verifies a
-signed installer package for `/usr/local/bin/kpexec`.
+This is the first credentialed stage. Before changing the staging tree, it
+rejects dirty rehearsal manifests, verifies that the unsigned binary still
+matches `SHA256SUMS.unsigned`, rebuilds the reviewed clean Git commit in a fresh
+target directory and requires byte-for-byte agreement, and confirms both
+identities are usable. It then signs the staged binary with a secure timestamp,
+identifier `dev.crazytan.kpexec`, and hardened runtime; verifies the identifier, Team ID,
+architecture, deployment target, timestamp, and runtime flag; then creates and
+verifies a signed installer package for `/usr/local/bin/kpexec`.
 
 The defaults name Jia Tan's Team `V82M9YX8BR`. Override certificate display
 names without changing the expected Team ID when Keychain naming differs:
@@ -79,14 +87,26 @@ KPEXEC_NOTARY_PROFILE=kpexec-notary \
 
 The command waits for Apple's verdict, staples the ticket, validates it, checks
 the binary and installer signatures, confirms the package payload path, runs a
-Gatekeeper installer assessment, and writes the final `SHA256SUMS`. On an
-`Invalid` verdict, use the submission ID printed by `notarytool` to retrieve
+Gatekeeper installer assessment, and writes the final `SHA256SUMS` for the
+distributed package. On an `Invalid` verdict, use the submission ID printed by
+`notarytool` to retrieve
 the log; do not publish the artifact.
 
-The verification stage can be repeated without a notary profile:
+The verification stage can be repeated without a notary profile. It expands the
+package and verifies the exact identifier, version, install location, payload,
+ownership, modes, exact Developer ID Installer leaf, and Developer ID
+Application requirement on the packaged executable—not merely the copy left in
+staging. Installer scripts, distribution/component packages, PackageInfo script
+declarations, and any unexpected archive or payload path are rejected:
 
 ```sh
 ./scripts/release.sh verify dist/kpexec-0.1.0
+```
+
+A downloaded package is independently verifiable without its staging tree:
+
+```sh
+./scripts/release.sh verify ~/Downloads/kpexec-0.1.0-aarch64-apple-darwin.pkg
 ```
 
 ## 4. Manual ship gates

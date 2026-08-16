@@ -6,4 +6,4 @@
 spikes/*/target
 
 # Supervised spike transcripts contain machine-local observations.
-spikes/*.local-results.txt
+spikes/**/*.local-results.txt

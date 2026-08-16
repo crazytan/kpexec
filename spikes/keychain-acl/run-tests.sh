@@ -5,8 +5,8 @@
 # watch the screen and answer/deny dialogs. It is fail-closed and echoes every command.
 #
 # What it proves (milestone doc item 2 + security-design "Vault access control"):
-#   T1  team-signed binary (Developer ID + identifier dev.crazytan.kpexec, hardened
-#       runtime) creates an item and reads it back  -> EXPECT silent success, no dialog.
+#   T1  Apple-Development-signed binary (isolated .spike identifier + hardened runtime)
+#       creates an item and reads it back  -> EXPECT silent success, no dialog.
 #   T2  the SAME item read by a DIFFERENTLY-signed copy (ad-hoc, different identifier)
 #       -> EXPECT a GUI confirmation dialog or denial (human observes).
 #   T3  rebuild from source (different bytes) re-signed with the SAME identity+identifier
@@ -16,6 +16,8 @@
 #       an agent whitelisting kpexec) read by the signed kcprobe -> RECORD whether it is
 #       silently readable. If it IS, that is a FAIL of the anti-substitution design
 #       assumption and is flagged LOUDLY.
+#   T5  `run-backend-test.sh` separately signs a feature-gated profile of the real Rust
+#       backend and exercises its complete lifecycle on a unique isolated-service account.
 #
 # NOTE (partition-list investigation — answer to be confirmed at runtime):
 #   Question: after T1's SecItemAdd from a team-signed + hardened-runtime binary, is a
@@ -39,10 +41,12 @@
 set -euo pipefail
 
 # --- config ---------------------------------------------------------------
-IDENTITY="Developer ID Application: Jia Tan (V82M9YX8BR)"
-IDENTIFIER="dev.crazytan.kpexec"
+IDENTITY="Apple Development: Jia Tan (ZW5U6862Q8)"
+IDENTIFIER="dev.crazytan.kpexec.spike"
 TEAM_ID="V82M9YX8BR"
 SERVICE="dev.crazytan.kpexec.spike"   # NEVER touch any other service name
+DEVELOPMENT_REQUIREMENT="identifier \"$IDENTIFIER\" and anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.2] exists and certificate leaf[field.1.2.840.113635.100.6.1.12] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
+PRODUCTION_REQUIREMENT="identifier \"dev.crazytan.kpexec\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
 ACCT_MAIN="spike-main"
 ACCT_PLANTED="spike-planted"
 VALUE="spike-secret-do-not-reuse"
@@ -78,7 +82,7 @@ preflight() {
     echo "OK: Swift source type-checks"
 
     # Ad-hoc signing exercises the build/sign mechanics without asking the
-    # login Keychain for the Developer ID private key.
+    # login Keychain for any signing private key.
     preflight_dir="$(mktemp -d "${TMPDIR:-/tmp}/kpexec-keychain-acl-preflight.XXXXXX")"
     /usr/bin/swiftc -framework Security -o "$preflight_dir/kcprobe-v1" "$SRC"
     /usr/bin/swiftc -D KC_PROBE_V2 -framework Security \
@@ -97,7 +101,7 @@ preflight() {
 
     identity_output="$(/usr/bin/security find-identity -v -p codesigning 2>&1)"
     if grep -Fq "\"$IDENTITY\"" <<<"$identity_output"; then
-        echo "OK: Developer ID identity is installed and currently valid"
+        echo "OK: Apple Development identity is installed and currently valid"
     else
         echo "FAIL: signing identity not found: $IDENTITY" >&2
         failures=$((failures + 1))
@@ -254,17 +258,24 @@ record "service=$SERVICE"
 record "NOTE: synthetic spike values only; no real credential data is recorded."
 
 # =========================================================================
-# T1 — build, sign (Developer ID + hardened runtime + identifier), create+read
+# T1 — build, sign (Apple Development + isolated identifier), create+read
 # =========================================================================
 echo
 echo "########## T1: team-signed binary, silent create+read ##########"
 run /usr/bin/swiftc -framework Security -o "$BIN" "$SRC"
-pause "Developer ID signing may ask for private-key access. Approve only the codesign request for '$IDENTITY'."
+pause "Apple Development signing may ask for private-key access. Approve only the codesign request for '$IDENTITY'."
 run /usr/bin/codesign --force --options runtime --timestamp=none \
     --identifier "$IDENTIFIER" \
     --sign "$IDENTITY" \
     "$BIN"
-run /usr/bin/codesign --verify --strict --verbose=2 "$BIN"
+run /usr/bin/codesign --verify --strict --verbose=2 \
+    -R="$DEVELOPMENT_REQUIREMENT" "$BIN"
+if /usr/bin/codesign --verify --strict \
+    -R="$PRODUCTION_REQUIREMENT" "$BIN" >/dev/null 2>&1; then
+    echo "FAIL: T1 probe unexpectedly satisfies the production requirement" >&2
+    exit 1
+fi
+echo "PASS: T1 probe cannot satisfy the production Developer ID requirement"
 run /usr/bin/codesign -d -vv "$BIN" || true
 t1_hash="$(/usr/bin/shasum -a 256 "$BIN" | awk '{print $1}')"
 /usr/bin/codesign -d --requirements - "$BIN" > "$WORK/t1.requirement" 2>&1
@@ -308,7 +319,8 @@ echo "########## T2: differently-signed copy, expect prompt/denial ##########"
 run cp "$BIN" "$BIN_COPY"
 # Ad-hoc (-s -) sign, DIFFERENT identifier => different designated requirement => not the
 # blessed code. This is the "self-built / attacker binary" case.
-run /usr/bin/codesign --force --sign - --identifier "dev.crazytan.kpexec.impostor" "$BIN_COPY"
+run /usr/bin/codesign --force --sign - \
+    --identifier "dev.crazytan.kpexec.spike.impostor" "$BIN_COPY"
 run /usr/bin/codesign -d -vv "$BIN_COPY" || true
 
 pause "T2 read: about to READ the SAME item with the DIFFERENTLY-SIGNED copy. \
@@ -341,6 +353,12 @@ run /usr/bin/codesign --force --options runtime --timestamp=none \
     --sign "$IDENTITY" \
     "$BIN"
 run /usr/bin/codesign --verify --strict --verbose=2 "$BIN"
+run /usr/bin/codesign --verify --strict -R="$DEVELOPMENT_REQUIREMENT" "$BIN"
+if /usr/bin/codesign --verify --strict \
+    -R="$PRODUCTION_REQUIREMENT" "$BIN" >/dev/null 2>&1; then
+    echo "FAIL: T3 probe unexpectedly satisfies the production requirement" >&2
+    exit 1
+fi
 t3_hash="$(/usr/bin/shasum -a 256 "$BIN" | awk '{print $1}')"
 /usr/bin/codesign -d --requirements - "$BIN" > "$WORK/t3.requirement" 2>&1
 if [[ "$t1_hash" != "$t3_hash" ]]; then
@@ -442,3 +460,4 @@ echo "== all test steps executed: $overall =="
 echo "== machine + human observations saved to: $RESULTS_FILE =="
 echo "== Attach that file to the implementation task; it contains no real secret. =="
 echo "== cleanup runs now via trap. =="
+echo "== Next: run ./run-backend-test.sh --preflight, then ./run-backend-test.sh supervised. =="

@@ -5,8 +5,22 @@
 These validate assumptions the design leans on. If one fails, the design changes — so they come first.
 
 1. **KDBX4 write round-trip: ✅ VALIDATED (2026-07-05,** `spikes/kdbx-roundtrip`**).** All legs pass with `keepass` 0.13.13 + KeePassXC 2.7.12, including repeated crate-save → KeePassXC-edit → crate-save ping-pong with custom fields and the protected password byte-intact. Two hard requirements fell out and are now in the CLI design's KDBX rules: (a) KeePassXC rewrites the file as KDBX 4.0 on every save while the crate's dumper only accepts 4.1, so every kpexec save must pin `DatabaseVersion::KDB4(1)`; (b) writes must be temp-file + rename — the naive truncate-in-place pattern destroyed the test vault when a save errored.
-2. **Keychain ACL behavior for a CLI tool:** confirm the Team ID + identifier partition list lets the signed kpexec read the item silently, prompts for any other process, and survives a kpexec version upgrade without re-prompting. **Must include:** an item created *by another process* (simulating the agent, e.g. via `security add-generic-password -T`) is **not** silently readable by kpexec — this property is what blocks the vault-substitution attack (see security-design.md).
-3. **LocalAuthentication from a CLI:** confirm the Touch ID / account-password sheet can be invoked from a signed, hardened-runtime command-line binary in a normal terminal session, and fails closed over SSH / headless.
+2. **Keychain ACL behavior for a CLI tool: ✅ VALIDATED (2026-08-15,**
+   `spikes/keychain-acl`**).** T1–T4 proved silent genuine access, rejection of a
+   differently signed reader, silent same-identity upgrade access, and rejection of an
+   agent-planted `apple-tool:` item. T5 exercised the real Rust backend implementation's
+   create, non-secret ACL verification, read, update, reread, and delete lifecycle with
+   no dialog; cleanup confirmed the isolated item was absent. The original harnesses
+   signed mutable probes with Developer ID; current harnesses isolate them under Apple
+   Development identifiers/services and must be rerun before ship acceptance.
+3. **LocalAuthentication from a CLI: ✅ VALIDATED (2026-08-15,**
+   `spikes/local-auth`**).** The Rust/Objective-C production path
+   authorized through the account-password sheet in a console terminal (rc0). An initial
+   SSH run revealed that macOS can route LocalAuthentication UI to the active console,
+   so the design was corrected to reject remote/non-graphical Security sessions before
+   creating `LAContext`; the rerun returned UNAVAILABLE immediately (rc2) with no sheet.
+   The current safe harness uses an Apple Development `.spike` identifier and must be
+   rerun before ship acceptance.
 4. **Signing pipeline:** Developer ID (`dev.crazytan.kpexec`, Team ID `V82M9YX8BR`) + hardened runtime + notarization on a release artifact; verify a self-built (differently signed) binary degrades the ACL as documented rather than silently appearing to work.
 
 ## Implementation milestones
@@ -36,7 +50,9 @@ Functional:
 
 Hardening (require the signed binary):
 
-- **A12** Any mutating command with the LocalAuthentication prompt denied (or unavailable, e.g. over SSH) makes no vault change.
+- **A12** Any mutating command whose local graphical Security-session preflight or
+  LocalAuthentication approval fails (including SSH/headless invocation) makes no vault
+  change.
 - **A13** A differently-signed or unsigned binary cannot read the Keychain item without a user-visible prompt.
 - **A14** Vault substitution fails: an agent-planted Keychain item + `config.toml` pointing at an attacker vault is not honored — the run is rejected, not silently served from the attacker vault.
 - **A15** After a kpexec version upgrade (new binary, same Team ID + identifier), runs proceed with no new Keychain prompt.

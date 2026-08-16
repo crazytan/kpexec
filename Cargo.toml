@@ -8,6 +8,16 @@ license = "GPL-3.0-only"
 repository = "https://github.com/crazytan/kpexec"
 publish = false
 
+[features]
+default = []
+# Builds only the isolated Apple-Development-signed macOS backend probe. The
+# normal kpexec binary never selects this profile, even when the feature is on.
+supervised-probes = []
+
+[[example]]
+name = "keychain_backend_probe"
+required-features = ["supervised-probes"]
+
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -34,6 +44,7 @@ rand = "0.8"
 libc = "0.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
 security-framework = "3"
 
 [build-dependencies]

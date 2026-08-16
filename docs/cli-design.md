@@ -1,9 +1,10 @@
 # kpexec — CLI Design (condensed, generalized)
 
-> **Implementation status:** The command surface, LocalAuthentication gate, and
-> database-maintenance commands are implemented. Production Keychain access
-> remains fail-closed pending supervised ACL provisioning, and release signing
-> and notarization are not complete. See the [README](../README.md#status).
+> **Implementation status:** The command surface, LocalAuthentication gate,
+> database-maintenance commands, and production Keychain ACL verification are
+> implemented. The supervised planted-item matrix and real Rust backend lifecycle
+> pass; release signing and notarization are not complete. See the
+> [README](../README.md#status).
 
 Design stance: the user may have never used KeePass. kpexec owns the full lifecycle — it creates and manages a dedicated `.kdbx` vault (standard format, still openable in KeePassXC), so KeePass is an implementation detail the user can ignore. Secrets are never accepted as CLI arguments; policies are authored through prompts, never hand-written JSON in a KeePass GUI. Every command that mutates the vault must pass a Touch ID / account-password check before execution (see [security-design.md](security-design.md)); read and run paths never prompt.
 

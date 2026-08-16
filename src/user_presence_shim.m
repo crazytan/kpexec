@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <LocalAuthentication/LocalAuthentication.h>
+#import <Security/AuthSession.h>
 #import <dispatch/dispatch.h>
 
 #include <stddef.h>
@@ -64,6 +65,36 @@ int kpexec_authorize_user_presence(const char *reason_utf8,
         NSString *reason = [NSString stringWithUTF8String:reason_utf8];
         if (reason == nil || reason.length == 0) {
             return KPEXEC_AUTH_INTERNAL;
+        }
+
+        // LocalAuthentication can route UI from an SSH process to the active
+        // console session. Reject remote and non-graphical security sessions
+        // before creating an LAContext so a headless caller cannot summon a
+        // misleading approval sheet. These are kernel Security-session/audit
+        // attributes inherited across fork/exec, not spoofable SSH environment
+        // variables.
+        SessionAttributeBits session_attributes = 0;
+        OSStatus session_status = SessionGetInfo(callerSecuritySession,
+                                                  NULL,
+                                                  &session_attributes);
+        if (session_status != errSessionSuccess) {
+            NSString *message = [NSString
+                stringWithFormat:@"Security session inspection failed: OSStatus %d",
+                                 (int)session_status];
+            copy_message(error_buffer, error_capacity, message);
+            return KPEXEC_AUTH_UNAVAILABLE;
+        }
+        if ((session_attributes & sessionIsRemote) != 0) {
+            copy_message(error_buffer,
+                         error_capacity,
+                         @"LocalAuthentication is disabled for remote security sessions");
+            return KPEXEC_AUTH_UNAVAILABLE;
+        }
+        if ((session_attributes & sessionHasGraphicAccess) == 0) {
+            copy_message(error_buffer,
+                         error_capacity,
+                         @"LocalAuthentication requires a graphical security session");
+            return KPEXEC_AUTH_UNAVAILABLE;
         }
 
         LAContext *context = [[LAContext alloc] init];

@@ -8,10 +8,10 @@
 #
 #   xcrun notarytool store-credentials kpexec-notary \
 #       --apple-id "<your-apple-id-email>" \
-#       --team-id  "V82M9YX8BR" \
-#       --password "<app-specific-password>"
+#       --team-id  "V82M9YX8BR"
 #
-#   * <app-specific-password> is an APP-SPECIFIC password generated at
+#   * Enter the APP-SPECIFIC password at notarytool's secure interactive prompt.
+#     It is generated at
 #     https://account.apple.com  (Sign-In and Security > App-Specific Passwords) — NOT your
 #     real Apple ID password. notarytool stores it in the keychain under the profile name
 #     'kpexec-notary'; from then on only the profile name is referenced.
@@ -24,8 +24,9 @@
 # ================================================================================================
 #
 # Usage: ./notarize.sh <signed-artifact>
-#   <signed-artifact> should already be signed by sign.sh (Developer ID + hardened runtime +
-#   secure timestamp). Notarization REQUIRES hardened runtime and a secure timestamp.
+#   <signed-artifact> must come from the credentialed scripts/release.sh flow
+#   (Developer ID + hardened runtime + secure timestamp). The legacy arbitrary-
+#   binary sign.sh helper is intentionally disabled.
 #
 # notarytool submits a .zip (or .dmg/.pkg). A bare Mach-O binary must be zipped first. Stapling
 # a ticket to a bare binary is not supported — for a CLI, the notarization ticket is validated
@@ -66,8 +67,7 @@ Run the one-time setup documented in the header of this script:
 
   xcrun notarytool store-credentials $PROFILE \\
       --apple-id "<your-apple-id-email>" \\
-      --team-id  "V82M9YX8BR" \\
-      --password "<app-specific-password>"
+      --team-id  "V82M9YX8BR"
 
 EOF
     exit 12

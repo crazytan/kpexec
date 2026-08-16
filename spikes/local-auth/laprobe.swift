@@ -4,8 +4,8 @@
 // hardened-runtime command-line binary in a normal terminal, and FAILS CLOSED over SSH
 // or headless (never silently returns PASS).
 //
-// Build:  swiftc -framework LocalAuthentication -o laprobe laprobe.swift
-// Sign:   see run-tests.sh (Developer ID, hardened runtime, identifier dev.crazytan.kpexec)
+// Build:  swiftc -framework LocalAuthentication -framework Security -o laprobe laprobe.swift
+// Sign:   see run-tests.sh (Apple Development, isolated .spike identifier)
 //
 // Policy: .deviceOwnerAuthentication  (Touch ID with account-password fallback). We use
 // this rather than .deviceOwnerAuthenticationWithBiometrics because kpexec's design
@@ -24,14 +24,35 @@
 
 import Foundation
 import LocalAuthentication
+import Security
 
 let reason = "kpexec spike: approve test mutation"
+
+// LocalAuthentication may route UI from an SSH process to the active console.
+// Mirror kpexec's production Security-session preflight so remote/non-graphical
+// callers fail before LAContext exists and therefore cannot summon a sheet.
+var sessionAttributes = SessionAttributeBits()
+let sessionStatus = SessionGetInfo(callerSecuritySession, nil, &sessionAttributes)
+if sessionStatus != errSessionSuccess {
+    FileHandle.standardError.write(
+        Data("UNAVAILABLE: Security session inspection failed: OSStatus \(sessionStatus)\n".utf8))
+    exit(2)
+}
+if sessionAttributes.contains(.sessionIsRemote) {
+    FileHandle.standardError.write(
+        Data("UNAVAILABLE: LocalAuthentication is disabled for remote security sessions\n".utf8))
+    exit(2)
+}
+if !sessionAttributes.contains(.sessionHasGraphicAccess) {
+    FileHandle.standardError.write(
+        Data("UNAVAILABLE: LocalAuthentication requires a graphical security session\n".utf8))
+    exit(2)
+}
 
 let context = LAContext()
 var authError: NSError?
 
-// First: can the policy even be evaluated? Over SSH / headless this is where we expect
-// to fail closed (LAError.biometryNotAvailable / .notInteractive / passcodeNotSet, etc.).
+// After the security-session preflight, confirm the policy is available.
 let policy: LAPolicy = .deviceOwnerAuthentication
 
 if !context.canEvaluatePolicy(policy, error: &authError) {
