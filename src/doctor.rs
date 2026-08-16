@@ -126,7 +126,24 @@ pub struct CodeSignature {
     pub identifier_valid: bool,
     pub team_id_valid: bool,
     pub hardened_runtime: bool,
-    pub notarized: bool,
+    pub gatekeeper: GatekeeperAssessment,
+}
+
+/// What `spctl --assess --type execute` established for the current executable.
+///
+/// A bare command-line executable installed from a notarized package is not an
+/// app bundle, so Gatekeeper may correctly decline to assess it as an app. The
+/// package itself remains the authoritative notarization artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatekeeperAssessment {
+    /// Gatekeeper explicitly reported `source=Notarized Developer ID`.
+    NotarizedDeveloperId,
+    /// The code is valid, but this assessment type does not apply to a bare CLI.
+    NotApplicableToBareCli,
+    /// Gatekeeper made an actual rejection decision.
+    Rejected,
+    /// The tool failed or returned an unrecognized result.
+    Unknown,
 }
 
 impl CodeSignature {
@@ -136,7 +153,6 @@ impl CodeSignature {
             && self.identifier_valid
             && self.team_id_valid
             && self.hardened_runtime
-            && self.notarized
     }
 }
 
@@ -270,8 +286,8 @@ fn inspect_current_signature() -> CodeSignature {
         .args(["-d", "--verbose=4"])
         .arg(&executable)
         .output();
-    let notarization = Command::new("/usr/sbin/spctl")
-        .args(["--assess", "--type", "execute", "--verbose=2"])
+    let gatekeeper = Command::new("/usr/sbin/spctl")
+        .args(["--assess", "--type", "execute", "--verbose=4"])
         .arg(&executable)
         .output();
 
@@ -280,8 +296,8 @@ fn inspect_current_signature() -> CodeSignature {
         .as_ref()
         .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
         .unwrap_or_default();
-    let notarization_ok = notarization.as_ref().is_ok_and(|o| o.status.success());
-    let notarization_text = notarization
+    let gatekeeper_ok = gatekeeper.as_ref().is_ok_and(|o| o.status.success());
+    let gatekeeper_text = gatekeeper
         .as_ref()
         .map(|o| {
             format!(
@@ -291,19 +307,14 @@ fn inspect_current_signature() -> CodeSignature {
             )
         })
         .unwrap_or_default();
-    parse_signature_outputs(
-        verify_ok,
-        &display_text,
-        notarization_ok,
-        &notarization_text,
-    )
+    parse_signature_outputs(verify_ok, &display_text, gatekeeper_ok, &gatekeeper_text)
 }
 
 fn parse_signature_outputs(
     verify_ok: bool,
     display: &str,
-    notarization_ok: bool,
-    notarization: &str,
+    gatekeeper_ok: bool,
+    gatekeeper: &str,
 ) -> CodeSignature {
     CodeSignature {
         integrity_valid: verify_ok,
@@ -319,7 +330,21 @@ fn parse_signature_outputs(
         hardened_runtime: display
             .lines()
             .any(|line| line.starts_with("CodeDirectory ") && line.contains("(runtime)")),
-        notarized: notarization_ok && notarization.contains("source=Notarized Developer ID"),
+        gatekeeper: parse_gatekeeper_assessment(gatekeeper_ok, gatekeeper),
+    }
+}
+
+fn parse_gatekeeper_assessment(success: bool, output: &str) -> GatekeeperAssessment {
+    if success && output.contains("source=Notarized Developer ID") {
+        return GatekeeperAssessment::NotarizedDeveloperId;
+    }
+    let normalized = output.to_ascii_lowercase();
+    if normalized.contains("code is valid but does not seem to be an app") {
+        GatekeeperAssessment::NotApplicableToBareCli
+    } else if normalized.contains("rejected") {
+        GatekeeperAssessment::Rejected
+    } else {
+        GatekeeperAssessment::Unknown
     }
 }
 
@@ -354,12 +379,20 @@ fn check_code_signature(signature: &CodeSignature, checks: &mut Vec<Check>) {
         "hardened runtime is not enabled",
         checks,
     );
-    signature_check(
-        signature.notarized,
-        "Gatekeeper identifies the executable as Notarized Developer ID",
-        "Gatekeeper does not identify the executable as Notarized Developer ID",
-        checks,
-    );
+    checks.push(match signature.gatekeeper {
+        GatekeeperAssessment::NotarizedDeveloperId => Check::ok(
+            "Gatekeeper identifies the executable as Notarized Developer ID",
+        ),
+        GatekeeperAssessment::NotApplicableToBareCli => Check::warn(
+            "Gatekeeper executable assessment is not applicable to this bare CLI; the installed executable cannot prove installer notarization, so verify the distributed package",
+        ),
+        GatekeeperAssessment::Rejected => Check::fail(
+            "Gatekeeper rejected the executable; verify the distributed installer package and installed payload",
+        ),
+        GatekeeperAssessment::Unknown => Check::warn(
+            "Gatekeeper executable assessment was unavailable or unrecognized; notarization must be verified on the distributed installer package",
+        ),
+    });
 }
 
 fn signature_check(
@@ -589,7 +622,7 @@ mod tests {
             identifier_valid: true,
             team_id_valid: true,
             hardened_runtime: true,
-            notarized: true,
+            gatekeeper: GatekeeperAssessment::NotarizedDeveloperId,
         }
     }
 
@@ -682,15 +715,74 @@ TeamIdentifier=V82M9YX8BR\n";
         let impostor = display.replace("V82M9YX8BR", "OTHERTEAM1");
         let parsed = parse_signature_outputs(true, &impostor, true, "source=Developer ID");
         assert!(!parsed.team_id_valid);
-        assert!(!parsed.notarized);
+        assert_eq!(parsed.gatekeeper, GatekeeperAssessment::Unknown);
         assert!(!parsed.trusted_for_keychain());
     }
 
-    struct UnverifiedStore {
-        gets: Cell<usize>,
+    #[test]
+    fn bare_cli_gatekeeper_not_applicable_is_warning_not_trust_failure() {
+        let display = "\
+Identifier=dev.crazytan.kpexec\n\
+CodeDirectory v=20500 size=1 flags=0x10000(runtime) hashes=1+0 location=embedded\n\
+Authority=Developer ID Application: Jia Tan (V82M9YX8BR)\n\
+TeamIdentifier=V82M9YX8BR\n";
+        let parsed = parse_signature_outputs(
+            true,
+            display,
+            false,
+            "/usr/local/bin/kpexec: rejected (the code is valid but does not seem to be an app)\n",
+        );
+        assert_eq!(
+            parsed.gatekeeper,
+            GatekeeperAssessment::NotApplicableToBareCli
+        );
+        assert!(parsed.trusted_for_keychain());
+
+        let mut checks = Vec::new();
+        check_code_signature(&parsed, &mut checks);
+        assert!(checks.iter().any(|check| {
+            check.level == Level::Warn
+                && check
+                    .message
+                    .contains("cannot prove installer notarization")
+        }));
+        assert!(
+            !checks.iter().any(|check| {
+                check.level == Level::Fail && check.message.contains("Gatekeeper")
+            })
+        );
     }
 
-    impl KeychainStore for UnverifiedStore {
+    #[test]
+    fn actual_gatekeeper_rejection_remains_failure() {
+        assert_eq!(
+            parse_gatekeeper_assessment(
+                false,
+                "/usr/local/bin/kpexec: rejected\nsource=Unnotarized Developer ID\n"
+            ),
+            GatekeeperAssessment::Rejected
+        );
+        let mut signature = trusted_signature();
+        signature.gatekeeper = GatekeeperAssessment::Rejected;
+        let mut checks = Vec::new();
+        check_code_signature(&signature, &mut checks);
+        assert!(checks.iter().any(|check| {
+            check.level == Level::Fail && check.message.contains("Gatekeeper rejected")
+        }));
+        // Package notarization is not part of the Keychain identity proof.
+        assert!(signature.trusted_for_keychain());
+    }
+
+    struct CountingStore {
+        gets: Cell<usize>,
+        binding: AclBinding,
+    }
+
+    impl KeychainStore for CountingStore {
+        fn acl_binding(&self, _account: &str) -> Result<AclBinding> {
+            Ok(self.binding)
+        }
+
         fn get(&self, _account: &str) -> Result<Option<VaultCredential>> {
             self.gets.set(self.gets.get() + 1);
             Err(KpexecError::internal("get must not be called"))
@@ -716,7 +808,10 @@ TeamIdentifier=V82M9YX8BR\n";
             format!("db_path = {:?}\n", vault_path.to_string_lossy()),
         )
         .unwrap();
-        let store = UnverifiedStore { gets: Cell::new(0) };
+        let store = CountingStore {
+            gets: Cell::new(0),
+            binding: AclBinding::Unverified,
+        };
 
         let report = run_full_with(
             &config_path,
@@ -729,6 +824,46 @@ TeamIdentifier=V82M9YX8BR\n";
         assert_eq!(store.gets.get(), 0);
         assert!(report.checks.iter().any(|check| {
             check.level == Level::Fail && check.message.contains("ACL provenance is absent")
+        }));
+    }
+
+    #[test]
+    fn invalid_identity_with_bare_cli_assessment_never_reads_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join("vault.kdbx");
+        std::fs::write(&vault_path, b"not opened").unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!("db_path = {:?}\n", vault_path.to_string_lossy()),
+        )
+        .unwrap();
+        let store = CountingStore {
+            gets: Cell::new(0),
+            binding: AclBinding::Verified,
+        };
+        let mut signature = trusted_signature();
+        signature.identifier_valid = false;
+        signature.gatekeeper = GatekeeperAssessment::NotApplicableToBareCli;
+
+        let report = run_full_with(
+            &config_path,
+            &dir.path().join("logs"),
+            dir.path(),
+            Some(dir.path()),
+            &signature,
+            &store,
+        );
+
+        assert_eq!(store.gets.get(), 0);
+        assert!(report.checks.iter().any(|check| {
+            check.level == Level::Fail && check.message.contains("code-signing identifier")
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.level == Level::Warn
+                && check
+                    .message
+                    .contains("cannot prove installer notarization")
         }));
     }
 
@@ -780,12 +915,14 @@ TeamIdentifier=V82M9YX8BR\n";
         )
         .unwrap();
 
+        let mut signature = trusted_signature();
+        signature.gatekeeper = GatekeeperAssessment::NotApplicableToBareCli;
         let report = run_full_with(
             &config_path,
             &dir.path().join("logs"),
             dir.path(),
             Some(dir.path()),
-            &trusted_signature(),
+            &signature,
             &keychain,
         );
         assert!(
@@ -799,6 +936,18 @@ TeamIdentifier=V82M9YX8BR\n";
                 && check
                     .message
                     .contains("policy-injected variable `GH_TOKEN`")
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.level == Level::Ok
+                && check
+                    .message
+                    .contains("protected db_path agrees with config")
+        }));
+        assert!(report.checks.iter().any(|check| {
+            check.level == Level::Warn
+                && check
+                    .message
+                    .contains("cannot prove installer notarization")
         }));
         assert!(!report.render().contains("must-not-be-reported"));
     }

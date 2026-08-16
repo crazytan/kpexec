@@ -124,3 +124,17 @@ clean-machine checks:
 4. Confirm protected `main` requires the green CI checks, create the signed
    release tag, publish the `.pkg`, `SHA256SUMS`, license, and matching source
    archive, and verify the downloaded package again before announcing it.
+
+`kpexec doctor` verifies the installed executable's strict Developer ID
+signature, exact identifier and Team ID, and hardened runtime. Gatekeeper may
+report `code is valid but does not seem to be an app` for the installed bare
+CLI; doctor reports that result as a warning because an individual non-bundle
+executable is not the notarization artifact. The release gate is the successful
+installer-package verification above, including its stapled ticket and
+`spctl --type install` assessment. Do not treat the doctor warning as
+independent proof that the package was notarized. Correlate the clean install
+with the verified artifact: confirm the `dev.crazytan.kpexec.pkg` receipt and
+version with `pkgutil --pkg-info`, compare that version with `kpexec --version`,
+and byte-compare `/usr/local/bin/kpexec` with the executable extracted from the
+exact verified package. This guards against assessing one package while testing
+a different installed payload.

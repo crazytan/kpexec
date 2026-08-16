@@ -106,7 +106,7 @@ Mutating commands are marked **[Touch ID]** — each must pass a user-presence p
 - `kpexec init [--db <path>] [--use-existing]` **[Touch ID]**
   Default: creates `~/Secrets/kpexec-agent.kdbx` with a generated master password stored in macOS Keychain (ACL-bound to kpexec), plus `~/.config/kpexec/config.toml`. Prints the master password **once** as a recovery key, with instructions to store it outside the agent's reach (personal password manager or paper). `--use-existing` adopts an existing kdbx (prompts for its password once, stores it in Keychain).
 - `kpexec doctor`
-  Validates config (including that `db_path` agrees with the path embedded in the Keychain item), the Keychain item and its ACL binding, DB openability, and kpexec's own code signature; warns if project `.env*` files near cwd contain any env var name that a policy injects, when a command is unpinned (`--no-pin`), and when a pin is stale (target binary changed since authoring — repin before the agent's next run fails).
+  Validates config (including that `db_path` agrees with the path embedded in the Keychain item), the Keychain item and its ACL binding, DB openability, and kpexec's own strict Developer ID signature, exact identity, and hardened runtime. Gatekeeper's `not an app` response for an installed bare CLI is reported as not-applicable warning; notarization is verified on the distributed installer package, not inferred independently from the installed executable. Doctor also warns if project `.env*` files near cwd contain any env var name that a policy injects, when a command is unpinned (`--no-pin`), and when a pin is stale (target binary changed since authoring — repin before the agent's next run fails).
 
 ### Entry & policy management (secrets never printed)
 
