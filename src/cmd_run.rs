@@ -9,17 +9,20 @@
 //!    (unknown-command → 101), parse the policy (malformed-policy → 102). Deny
 //!    by default on every failure (invariant 1).
 //! 2. **Verifies the pin** (invariant 4/5): canonicalize `command.exe` (absolute,
-//!    exists, regular file, executable — else reject), then hash the canonical
-//!    target's bytes *immediately before spawn* and compare to `exe_sha256`.
-//!    Mismatch → exe-hash-mismatch (103). An unpinned command (`--no-pin`) runs
-//!    but prints a WARN line.
+//!    exists, regular file, executable — else reject), hash it, and compare to
+//!    `exe_sha256`. Because macOS provides no `fexecve(2)`, pinned execution is
+//!    allowed only when neither the canonical file nor any ancestor is writable
+//!    or owned by the current user; otherwise it fails closed rather than leave
+//!    a hash-to-exec race. Mismatch → exe-hash-mismatch (103). An explicitly
+//!    unpinned command (`--no-pin`) runs but prints a WARN line.
 //! 3. **Builds argv** (invariants 2/3): exactly `[canonical_exe] + argv_prefix +
 //!    trailing_args`, each element passed verbatim — no shell, no interpolation.
 //! 4. **Builds the child env from scratch** (invariants 6/7): `env_clear()`, then
 //!    HOME/TMPDIR/LANG passed through if set, a fixed `PATH=/usr/bin:/bin`, the
 //!    policy `env.set` entries, and finally the injected secret var. Nothing
 //!    else is inherited. cwd inherits the caller's; stdin is closed.
-//! 5. **Spawns**, capturing stdout/stderr fully buffered, then redacting them
+//! 5. **Spawns**, capturing bounded stdout/stderr prefixes while draining both
+//!    pipes to EOF, then redacting them
 //!    (invariant 10, in [`crate::output`]: mask the secret and its variant forms,
 //!    fail closed if any survive), enforcing the timeout (SIGTERM → SIGKILL after
 //!    a grace period), and propagating the child's exit code verbatim (signals as
@@ -32,8 +35,8 @@
 //! # The no-secret-on-dry-run guarantee
 //!
 //! The secret is read only by [`Vault::read_secret`], and that call lives on a
-//! single line in [`spawn_and_wait`], reachable only after the `--dry-run`
-//! early-return. Resolution ([`resolve`]) and pin verification never touch the
+//! single line in `spawn_and_wait`, reachable only after the `--dry-run`
+//! early-return. Resolution (`resolve`) and pin verification never touch the
 //! Password field. So `--dry-run` structurally cannot read the secret — it is
 //! not a matter of an untaken branch inside the spawn code, it is a call the
 //! dry-run path never reaches.
@@ -138,7 +141,8 @@ fn effective_timeout(args: &RunArgs, cfg: &config::Config) -> Duration {
 ///
 /// The flow is deliberately linear so the security-critical ordering is visible:
 /// resolve → verify pin → (dry-run stops here) → read secret → build env →
-/// spawn. Every exit point routes through [`emit`], which logs exactly once.
+/// spawn. Every exit point routes through the supplied [`Emit`] sink and logs
+/// exactly once.
 pub fn run_with(
     args: &RunArgs,
     vault_path: &Path,
@@ -225,7 +229,7 @@ pub fn run_with(
     }
 
     // ---- spawn path -------------------------------------------------------
-    match spawn_and_wait(&vault, &args.entry, &policy, &canonical_exe, &argv, opts) {
+    match spawn_and_wait(&vault, &args.entry, &policy, &verified, &argv, opts) {
         Ok(spawned) => emit_spawned(
             emit,
             args,
@@ -301,15 +305,14 @@ struct Verified {
     unpinned: bool,
 }
 
-/// Canonicalize + validate the executable, then (if pinned) hash it and compare
-/// to `exe_sha256` — the hash is the *last* thing done before the caller spawns,
-/// to minimize the TOCTOU window.
+/// Canonicalize + validate the executable, then (if pinned) hash it, compare to
+/// `exe_sha256`, and prove the current principal cannot mutate or replace its
+/// canonical path before the caller spawns.
 ///
 /// Canonicalization + regular-file check comes from [`pin::compute`], which also
 /// produces the fresh hash; we additionally require the target to be executable.
 fn verify_exe(command: &PolicyCommand) -> Result<Verified> {
     let fresh = pin::compute(&command.exe)?;
-
     if !is_executable(&fresh.canonical) {
         return Err(KpexecError::new(
             KpexecStatus::MalformedPolicy,
@@ -320,14 +323,9 @@ fn verify_exe(command: &PolicyCommand) -> Result<Verified> {
     match &command.exe_sha256 {
         Some(recorded) => {
             if !fresh.sha256.eq_ignore_ascii_case(recorded) {
-                return Err(KpexecError::new(
-                    KpexecStatus::ExeHashMismatch,
-                    format!(
-                        "executable {} has changed since it was pinned; run `kpexec entry repin` to re-approve it",
-                        fresh.canonical.display()
-                    ),
-                ));
+                return Err(pin_mismatch(&fresh.canonical));
             }
+            pin::require_enforceable(&fresh.canonical)?;
             Ok(Verified {
                 canonical: fresh.canonical,
                 unpinned: false,
@@ -338,6 +336,16 @@ fn verify_exe(command: &PolicyCommand) -> Result<Verified> {
             unpinned: true,
         }),
     }
+}
+
+fn pin_mismatch(canonical: &Path) -> KpexecError {
+    KpexecError::new(
+        KpexecStatus::ExeHashMismatch,
+        format!(
+            "executable {} has changed since it was pinned; run `kpexec entry repin` to re-approve it",
+            canonical.display()
+        ),
+    )
 }
 
 /// Whether the file has any execute bit set (owner/group/other). On Unix we read
@@ -420,16 +428,22 @@ fn spawn_and_wait(
     vault: &Vault,
     entry_id: &str,
     policy: &Policy,
-    canonical_exe: &Path,
+    verified: &Verified,
     argv: &[String],
     opts: &RunOptions,
 ) -> Result<Spawned> {
     // >>> The single secret read on the entire run path. <<<
     let secret = vault.read_secret(entry_id)?;
 
+    let canonical_exe = &verified.canonical;
     let mut cmd = Command::new(canonical_exe);
     // argv[0] is the exe itself; the rest are the actual arguments.
     cmd.args(&argv[1..]);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.arg0(canonical_exe);
+    }
     apply_env(
         &mut cmd,
         policy.env.as_ref(),
@@ -468,8 +482,21 @@ fn spawn_and_wait(
 
     // Read stdout/stderr on separate threads so a chatty child cannot deadlock on
     // a full pipe buffer while we wait for exit.
-    let stdout_handle = child.stdout.take().map(spawn_reader);
-    let stderr_handle = child.stderr.take().map(spawn_reader);
+    // Retain enough look-ahead to redact a secret variant that straddles the
+    // configured byte cap, plus one byte to prove truncation. The reader keeps
+    // draining after that bounded prefix is full, preventing pipe deadlock
+    // without letting child-controlled output grow the parent heap to EOF.
+    let max_variant_len = output::max_secret_variant_len(&secret);
+    let stdout_limit = capture_limit(policy.output.max_stdout_bytes, max_variant_len);
+    let stderr_limit = capture_limit(policy.output.max_stderr_bytes, max_variant_len);
+    let stdout_handle = child
+        .stdout
+        .take()
+        .map(|pipe| spawn_reader(pipe, stdout_limit));
+    let stderr_handle = child
+        .stderr
+        .take()
+        .map(|pipe| spawn_reader(pipe, stderr_limit));
 
     // Wait for exit on a helper thread so the main thread can enforce a timeout
     // while retaining the pid for signalling. The waiter owns `child`, calls
@@ -522,12 +549,47 @@ fn spawn_and_wait(
     })
 }
 
-/// Spawn a thread that reads a pipe to EOF, returning the bytes.
-fn spawn_reader<R: Read + Send + 'static>(mut r: R) -> std::thread::JoinHandle<Vec<u8>> {
+/// Convert a policy cap into the bounded raw prefix retained by a reader.
+fn capture_limit(policy_cap: u64, max_variant_len: usize) -> usize {
+    let cap = usize::try_from(policy_cap).unwrap_or(usize::MAX);
+    if max_variant_len == 0 {
+        return cap.saturating_add(1);
+    }
+
+    // Redaction can contract a long variant to the shorter fixed marker. To
+    // retain enough raw bytes for the first `cap + 1` redacted bytes, budget
+    // for the worst case where every output token is a marker produced from a
+    // maximum-length variant. One additional variant-sized look-ahead prevents
+    // the bounded prefix from ending in a partial secret after earlier matches
+    // have contracted.
+    let marker_len = output::REDACTION_MARKER.len();
+    if max_variant_len > marker_len {
+        let wanted = cap.saturating_add(1);
+        let matches = wanted.div_ceil(marker_len);
+        matches
+            .saturating_mul(max_variant_len)
+            .saturating_add(max_variant_len - 1)
+    } else {
+        cap.saturating_add(max_variant_len)
+    }
+}
+
+/// Spawn a thread that retains at most `limit` bytes while draining to EOF.
+fn spawn_reader<R: Read + Send + 'static>(
+    mut r: R,
+    limit: usize,
+) -> std::thread::JoinHandle<Vec<u8>> {
     std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = r.read_to_end(&mut buf);
-        buf
+        let mut retained = Vec::with_capacity(limit.min(64 * 1024));
+        let mut chunk = [0_u8; 16 * 1024];
+        while let Ok(n) = r.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            let remaining = limit.saturating_sub(retained.len());
+            retained.extend_from_slice(&chunk[..n.min(remaining)]);
+        }
+        retained
     })
 }
 
@@ -742,6 +804,8 @@ fn render_argv(argv: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn cmd(exe: &str, prefix: &[&str], hash: Option<&str>) -> PolicyCommand {
         PolicyCommand {
@@ -813,14 +877,7 @@ mod tests {
 
     #[test]
     fn verify_accepts_matching_hash() {
-        let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join("tool");
-        std::fs::write(&exe, b"#!/bin/sh\ntrue\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let exe = std::fs::canonicalize("/bin/sh").unwrap();
         let good = pin::compute(exe.to_str().unwrap()).unwrap().sha256;
         let c = cmd(exe.to_str().unwrap(), &[], Some(&good));
         let v = verify_exe(&c).unwrap();
@@ -855,5 +912,89 @@ mod tests {
             let err = verify_exe(&c).unwrap_err();
             assert_eq!(err.status(), KpexecStatus::MalformedPolicy);
         }
+    }
+
+    #[test]
+    fn reader_retains_only_bound_and_still_drains_to_eof() {
+        struct CountingReader {
+            remaining: usize,
+            read: Arc<AtomicUsize>,
+        }
+
+        impl Read for CountingReader {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.remaining.min(buf.len());
+                if n == 0 {
+                    return Ok(0);
+                }
+                buf[..n].fill(b'x');
+                self.remaining -= n;
+                self.read.fetch_add(n, Ordering::Relaxed);
+                Ok(n)
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let retained = spawn_reader(
+            CountingReader {
+                remaining: 8 * 1024 * 1024,
+                read: Arc::clone(&count),
+            },
+            37,
+        )
+        .join()
+        .unwrap();
+
+        assert_eq!(retained.len(), 37, "capture memory must stop at its bound");
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            8 * 1024 * 1024,
+            "discarded bytes must still be drained to avoid child deadlock"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matching_pin_on_user_replaceable_path_fails_closed() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let approved = dir.path().join("approved.sh");
+        std::fs::write(&approved, b"#!/bin/sh\nprintf SAFE\n").unwrap();
+        std::fs::set_permissions(&approved, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Exercise canonicalization as well: policy points through a symlink.
+        let policy_path = dir.path().join("tool");
+        symlink(&approved, &policy_path).unwrap();
+        let hash = pin::compute(policy_path.to_str().unwrap()).unwrap().sha256;
+        let err = verify_exe(&cmd(policy_path.to_str().unwrap(), &[], Some(&hash))).unwrap_err();
+        assert_eq!(err.status(), KpexecStatus::MalformedPolicy);
+        assert!(err.message().contains("hash-to-exec race"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_native_launch_preserves_canonical_argv_zero() {
+        use std::os::unix::process::CommandExt as _;
+
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        let hash = pin::compute(shell.to_str().unwrap()).unwrap().sha256;
+        let verified = verify_exe(&cmd(shell.to_str().unwrap(), &[], Some(&hash))).unwrap();
+
+        let mut child = Command::new(&verified.canonical);
+        child
+            .arg0(&verified.canonical)
+            .args(["-c", "printf '%s' \"$0\""]);
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "status={:?}, stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            verified.canonical.as_os_str().as_encoded_bytes()
+        );
     }
 }

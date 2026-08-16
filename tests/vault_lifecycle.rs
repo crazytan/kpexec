@@ -8,11 +8,13 @@
 //! db_path mismatch, secret masking in show, and the <8-char secret refusal.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use kpexec::cli::{
     CommandSpec, EntryAddCommandArgs, EntryRepinArgs, EntryRmCommandArgs, EntrySetSecretArgs,
     EntryShowArgs, InitArgs,
 };
+use kpexec::error::{KpexecError, Result};
 use kpexec::keychain::{FileKeychain, KeychainStore, VaultCredential, account_for};
 use kpexec::lock::VaultLock;
 use kpexec::pin;
@@ -29,6 +31,43 @@ struct Harness {
     config_path: PathBuf,
     /// A real, hashable executable to pin.
     exe: PathBuf,
+}
+
+/// A Keychain test double that rejects exactly the next `set`, then delegates.
+/// This models a real authorization denial while still allowing rollback to
+/// restore an older item on a forced re-init.
+struct FailNextSet<'a> {
+    inner: &'a dyn KeychainStore,
+    fail_next: AtomicBool,
+}
+
+impl<'a> FailNextSet<'a> {
+    fn new(inner: &'a dyn KeychainStore) -> Self {
+        Self {
+            inner,
+            fail_next: AtomicBool::new(true),
+        }
+    }
+}
+
+impl KeychainStore for FailNextSet<'_> {
+    fn set(&self, account: &str, credential: &VaultCredential) -> Result<()> {
+        if self.fail_next.swap(false, Ordering::SeqCst) {
+            return Err(KpexecError::new(
+                KpexecStatus::UnlockFailed,
+                "simulated Keychain authorization denial",
+            ));
+        }
+        self.inner.set(account, credential)
+    }
+
+    fn get(&self, account: &str) -> Result<Option<VaultCredential>> {
+        self.inner.get(account)
+    }
+
+    fn delete(&self, account: &str) -> Result<()> {
+        self.inner.delete(account)
+    }
 }
 
 impl Harness {
@@ -166,6 +205,71 @@ fn init_force_reinitializes() {
 }
 
 #[test]
+fn init_keychain_failure_rolls_back_new_vault_and_allows_retry() {
+    let h = Harness::new();
+    let args = InitArgs {
+        db: Some(h.vault_path.clone()),
+        use_existing: false,
+        force: false,
+        password_stdin: false,
+    };
+    let rejecting = FailNextSet::new(&h.keychain);
+
+    let err = cmd_init::run_with(&args, &rejecting, &h.config_path).unwrap_err();
+    assert_eq!(err.status(), KpexecStatus::UnlockFailed);
+    assert_eq!(err.message(), "simulated Keychain authorization denial");
+    assert!(!h.vault_path.exists(), "new vault must be rolled back");
+    assert!(!h.config_path.exists(), "config must remain absent");
+    assert!(
+        h.keychain
+            .get(&account_for(&h.vault_path))
+            .unwrap()
+            .is_none(),
+        "Keychain must remain empty"
+    );
+
+    // The failed attempt must not leave an orphan that blocks an ordinary
+    // retry without --force.
+    cmd_init::run_with(&args, &h.keychain, &h.config_path).unwrap();
+    assert!(h.vault_path.exists());
+}
+
+#[test]
+fn init_force_failure_restores_preexisting_user_state() {
+    let h = Harness::new();
+    h.init();
+    let vault_before = std::fs::read(&h.vault_path).unwrap();
+    let config_before = std::fs::read(&h.config_path).unwrap();
+    let account = account_for(&h.vault_path);
+    let credential_before = h.keychain.get(&account).unwrap().unwrap();
+    let backup_path = PathBuf::from(format!("{}.bak", h.vault_path.display()));
+    assert!(!backup_path.exists());
+
+    let args = InitArgs {
+        db: Some(h.vault_path.clone()),
+        use_existing: false,
+        force: true,
+        password_stdin: false,
+    };
+    let rejecting = FailNextSet::new(&h.keychain);
+    let err = cmd_init::run_with(&args, &rejecting, &h.config_path).unwrap_err();
+
+    assert_eq!(err.status(), KpexecStatus::UnlockFailed);
+    assert_eq!(std::fs::read(&h.vault_path).unwrap(), vault_before);
+    assert_eq!(std::fs::read(&h.config_path).unwrap(), config_before);
+    assert!(
+        !backup_path.exists(),
+        "rollback must not leave a new backup"
+    );
+    let credential_after = h.keychain.get(&account).unwrap().unwrap();
+    assert_eq!(credential_after.db_path, credential_before.db_path);
+    assert_eq!(
+        credential_after.password.expose(),
+        credential_before.password.expose()
+    );
+}
+
+#[test]
 fn init_use_existing_verifies_password_via_stdin_is_covered_by_open_check() {
     // Directly test that a wrong password fails to adopt: create a vault with
     // one master, then attempt to open with a different credential.
@@ -252,7 +356,7 @@ fn add_and_remove_command() {
 
     let add = EntryAddCommandArgs {
         id: "github".to_string(),
-        no_pin: false,
+        no_pin: true,
         commands: vec![h.command_spec("c2", "deploy prod")],
     };
     cmd_entry::add_command_with(&add, &h.vault_path, &h.keychain, h.config_hint()).unwrap();
@@ -279,7 +383,7 @@ fn add_command_rejects_duplicate_name() {
 
     let add = EntryAddCommandArgs {
         id: "github".to_string(),
-        no_pin: false,
+        no_pin: true,
         commands: vec![h.command_spec("c1", "again")],
     };
     let err =
@@ -322,42 +426,32 @@ fn set_secret_rotates_and_short_secret_refused() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn repin_updates_stale_pin() {
+fn repin_rejects_user_replaceable_executable() {
     let h = Harness::new();
     h.init();
     h.add_entry("github");
 
-    // Mutate the target binary so the pin goes stale.
-    std::fs::write(&h.exe, b"#!/bin/sh\necho CHANGED\n").unwrap();
-
-    // check should now WARN about the stale pin.
+    // A hand-authored legacy pin under a user-owned path is unenforceable.
     let report = cmd_check::check_at(&h.vault_path, &h.keychain, None, None).unwrap();
     assert!(
         report
             .checks
             .iter()
-            .any(|c| c.message.contains("STALE") && c.level == kpexec::doctor::Level::Warn),
-        "expected a stale-pin warning: {:?}",
+            .any(|c| c.message.contains("hash-to-exec race")
+                && c.level == kpexec::doctor::Level::Fail),
+        "expected an unenforceable-pin failure: {:?}",
         report.checks.iter().map(|c| &c.message).collect::<Vec<_>>()
     );
 
-    // repin restores currency.
+    // Repin must not bless the same mutable pathname again.
     let args = EntryRepinArgs {
         id: "github".to_string(),
         command_name: None,
     };
-    cmd_entry::repin_with(&args, &h.vault_path, &h.keychain, h.config_hint()).unwrap();
-
-    let report = cmd_check::check_at(&h.vault_path, &h.keychain, None, None).unwrap();
-    assert!(
-        report
-            .checks
-            .iter()
-            .any(|c| c.message.contains("pin current")),
-        "pin should be current after repin"
-    );
-    // And no stale warnings remain.
-    assert!(!report.checks.iter().any(|c| c.message.contains("STALE")));
+    let err =
+        cmd_entry::repin_with(&args, &h.vault_path, &h.keychain, h.config_hint()).unwrap_err();
+    assert_eq!(err.status(), KpexecStatus::MalformedPolicy);
+    assert!(err.message().contains("hash-to-exec race"));
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +558,7 @@ fn live_lock_blocks_write() {
 
     let add = EntryAddCommandArgs {
         id: "x".to_string(),
-        no_pin: false,
+        no_pin: true,
         commands: vec![h.command_spec("c", "run")],
     };
     let err =
@@ -508,7 +602,7 @@ fn keepassxc_lockfile_refuses_write() {
 
     let add = EntryAddCommandArgs {
         id: "github".to_string(),
-        no_pin: false,
+        no_pin: true,
         commands: vec![h.command_spec("c2", "run two")],
     };
     let err =

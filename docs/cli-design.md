@@ -1,6 +1,11 @@
 # kpexec — CLI Design (condensed, generalized)
 
-Design stance: the user may have never used KeePass. kpexec owns the full lifecycle — it creates and manages a dedicated `.kdbx` vault (standard format, still openable in KeePassXC), so KeePass is an implementation detail the user can ignore. Secrets are never accepted as CLI arguments; policies are authored through prompts, never hand-written JSON in a KeePass GUI. Every command that mutates the vault ends in a Touch ID / account-password check (see [security-design.md](security-design.md)); read and run paths never prompt.
+> **Implementation status:** The command surface, LocalAuthentication gate, and
+> database-maintenance commands are implemented. Production Keychain access
+> remains fail-closed pending supervised ACL provisioning, and release signing
+> and notarization are not complete. See the [README](../README.md#status).
+
+Design stance: the user may have never used KeePass. kpexec owns the full lifecycle — it creates and manages a dedicated `.kdbx` vault (standard format, still openable in KeePassXC), so KeePass is an implementation detail the user can ignore. Secrets are never accepted as CLI arguments; policies are authored through prompts, never hand-written JSON in a KeePass GUI. Every command that mutates the vault must pass a Touch ID / account-password check before execution (see [security-design.md](security-design.md)); read and run paths never prompt.
 
 ## Data model
 
@@ -79,7 +84,7 @@ Rules:
 - Schema is versioned via the `"schema"` field; future revisions add `kpexec.policy.v2` rather than mutating v1.
 - kpexec reads and writes the vault itself (KDBX4 save). Writes take a kpexec-level lock, are atomic (serialize to a temp file in the vault's directory, fsync, rename over the vault only after a successful save, with a backup of the previous file — never truncate-in-place), and refuse to proceed if a KeePassXC lockfile is present. Every save **must pin the format to KDBX 4.1** (`db.config.version = DatabaseVersion::KDB4(1)` before `save`): KeePassXC 2.7.x rewrites the file as KDBX 4.0 on each of its saves, and the `keepass` crate's dumper only accepts 4.1 — validated by milestone-zero spike 1, including repeated ping-pong edits. The kpexec lock records PID + start time; a lock whose holder is no longer running is reclaimed. A crash mid-write leaves a temp file behind and the original vault intact. Hand-editing in KeePassXC is supported — close it first, run `kpexec check` afterwards.
 - Keychain: service `dev.crazytan.kpexec`, account `db-password:<fp>` where `<fp>` = first 12 hex chars of SHA-256 of the canonical vault path. The item's ACL is bound to the developer's Team ID + identifier `dev.crazytan.kpexec` (see security-design.md). The item *value* is a small JSON document `{"password": "...", "db_path": "..."}` — the vault's identity lives inside the ACL-protected item, and `config.toml` (agent-writable) is only a hint that must agree with it; kpexec never opens a vault the protected item doesn't name.
-- **Binary pinning:** `entry add` canonicalizes each command's `exe` (symlinks resolved — `/opt/homebrew/bin/gh` is hashed at its Cellar target) and stores the SHA-256 of the target file's bytes as `exe_sha256`. At run time kpexec re-canonicalizes and re-hashes immediately before exec, and rejects on mismatch (`exe-hash-mismatch`) with a message pointing at `kpexec entry repin`. Omitting the pin requires an explicit `--no-pin` at authoring time and is flagged by `check` and `doctor`. Pinning covers the executable file's bytes only — script shims load unpinned code at run time; see security-design.md.
+- **Binary pinning:** `entry add` canonicalizes each command's `exe` and stores the SHA-256 of the target file's bytes as `exe_sha256`. On macOS there is no public descriptor-based exec, so a pin is accepted only when the canonical file and every ancestor are neither writable nor owned by the current user; otherwise a same-UID agent could replace the path between hashing and exec. Authoring and `repin` reject such unenforceable pins, `check` reports hand-edited or legacy ones as failures, and `run` fails closed. Install pinnable tools under an admin-owned immutable path, or deliberately use `--no-pin` (flagged by `check` and `doctor`). Pinning covers the executable file's bytes only — script shims load unpinned code at run time; see security-design.md.
 - Every invocation — including `entry list` — pays a full Argon2id unlock; there is no daemon or session cache by design. KDF parameters are tuned at `init` to ~0.5 s on the local machine; agents should budget roughly a second of overhead per call.
 
 Reserved extensions (recorded now so the schema doesn't need a breaking redesign; will ship under a bumped `schema` string, since v1 rejects unknown fields): per-command `args` constraints (flag allow/deny lists, positional caps) and a `cwd` restriction. The full post-MVP list lives in [milestones.md](milestones.md).
@@ -93,7 +98,7 @@ Reserved extensions (recorded now so the schema doesn't need a breaking redesign
 
 ## Subcommands
 
-Mutating commands are marked **[Touch ID]** — each ends in a user-presence prompt summarizing the change.
+Mutating commands are marked **[Touch ID]** — each must pass a user-presence prompt summarizing the requested change before execution.
 
 ### Setup
 
@@ -104,9 +109,9 @@ Mutating commands are marked **[Touch ID]** — each ends in a user-presence pro
 
 ### Entry & policy management (secrets never printed)
 
-- `kpexec entry add [<id>]` **[Touch ID]** — wizard; writes the KeePass entry and generates the policy JSON. Loops so one entry can collect any number of command templates. Each command's executable is canonicalized and pinned (`exe_sha256`) automatically; `--no-pin` opts a command out, with a warning. Prefix input is parsed with shell-word rules (quoting supported); the wizard warns when a prefix is empty or a single word, since short prefixes grant broad surface. Secrets shorter than 8 characters are refused — redacting very short strings is unreliable and shreds output with false positives.
+- `kpexec entry add [<id>]` **[Touch ID]** — wizard; writes the KeePass entry and generates the policy JSON. Loops so one entry can collect any number of command templates. Each command's executable is canonicalized and pinned (`exe_sha256`) automatically when its path is enforceable; user-owned or writable paths are rejected with guidance to use an admin-owned immutable install or explicit `--no-pin`. Prefix input is parsed with shell-word rules (quoting supported); the wizard warns when a prefix is empty or a single word, since short prefixes grant broad surface. Secrets shorter than 8 characters are refused — redacting very short strings is unreliable and shreds output with false positives.
 - `kpexec entry add-command <id>` **[Touch ID]** — append another command template (grant a new action without re-entering the secret).
-- `kpexec entry repin <id> [<command-name>]` **[Touch ID]** — recompute pins after a legitimate upgrade of the target binary (e.g. `brew upgrade gh`). Shows old → new hash plus the file's mtime and size before the Touch ID prompt, so the user confirms a change they recognize. Without `<command-name>`, repins every command in the entry whose hash is stale.
+- `kpexec entry repin <id> [<command-name>]` **[Touch ID]** — after authorization, recompute pins following a legitimate upgrade of the target binary (e.g. `brew upgrade gh`). Shows old → new hash plus the file's mtime and size before persisting the change. Without `<command-name>`, repins every command in the entry whose hash is stale.
 - `kpexec entry rm-command <id> <name>` **[Touch ID]** — revoke a single action.
 - `kpexec entry set-secret <id>` **[Touch ID]** — rotate the stored credential without touching the policy.
 - `kpexec entry edit <id>` **[Touch ID]** — re-runs wizard fields; `kpexec entry rm <id>` **[Touch ID]**.
@@ -179,9 +184,9 @@ $ kpexec entry add-command github
   - `--command` is always required, even for single-template entries — optionality would make existing invocations break the moment a second template is added.
   - `--dry-run`: resolves entry + command and prints the exact argv that would run — no secret read, no subprocess.
   - `--timeout` default 300 s; on expiry the child gets SIGTERM, then SIGKILL after 5 s; partial output is redacted and returned with a timeout status.
-  - Output is fully buffered: nothing is emitted until the child exits (or times out), and redaction runs over the complete output. V1 has no streaming mode — streaming would require chunk-boundary-safe secret scanning and is deferred.
+  - Output emission is deferred until the child exits (or times out). Both pipes are drained to EOF, but memory retains only a bounded prefix sized from the policy byte cap plus enough look-ahead to redact encoded secrets crossing the boundary; bytes beyond it are discarded. V1 has no streaming emission mode.
   - `--json` emits a structured result: `{ "kpexec_status": "...", "child_exit_code": N, "stdout": "...", "stderr": "..." }`. This is the authoritative way for agents to distinguish kpexec-level failures from child failures.
-  - Exit codes: child's exit code propagated verbatim on execution. kpexec-level failures use a reserved band (100+: unknown-entry, unknown-command, malformed-policy, exe-hash-mismatch, unlock-failed, redaction-failure, timeout, config-error, internal). Children can legitimately exit 100–125, so the band is a convenience — `--json` is the reliable channel.
+  - Exit codes: child's exit code propagated verbatim on execution. kpexec-level failures use a reserved band (100+: unknown-entry, unknown-command, malformed-policy, exe-hash-mismatch, unlock-failed, redaction-failure, timeout, config-error, not-implemented, user-presence-denied, user-presence-unavailable, internal). Children can legitimately exit 100–125, so the band is a convenience — `--json` is the reliable channel.
 
 #### Example: execution
 

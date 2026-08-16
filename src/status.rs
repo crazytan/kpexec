@@ -49,6 +49,10 @@ pub enum KpexecStatus {
     ConfigError,
     /// A feature that is not part of the current milestone was invoked.
     NotImplemented,
+    /// The user explicitly denied or cancelled a mutation authorization.
+    UserPresenceDenied,
+    /// LocalAuthentication could not present an authorization challenge.
+    UserPresenceUnavailable,
     /// An unexpected internal error (a bug); the catch-all.
     Internal,
 }
@@ -68,6 +72,8 @@ impl KpexecStatus {
             KpexecStatus::Timeout => "timeout",
             KpexecStatus::ConfigError => "config-error",
             KpexecStatus::NotImplemented => "not-implemented",
+            KpexecStatus::UserPresenceDenied => "user-presence-denied",
+            KpexecStatus::UserPresenceUnavailable => "user-presence-unavailable",
             KpexecStatus::Internal => "internal",
         }
     }
@@ -90,6 +96,8 @@ impl KpexecStatus {
             KpexecStatus::ConfigError => 107,
             KpexecStatus::NotImplemented => 108,
             KpexecStatus::Internal => 109,
+            KpexecStatus::UserPresenceDenied => 110,
+            KpexecStatus::UserPresenceUnavailable => 111,
         }
     }
 }
@@ -186,6 +194,11 @@ mod tests {
     }
 
     #[test]
+    fn existing_internal_exit_code_remains_stable() {
+        assert_eq!(KpexecStatus::Internal.exit_code(), 109);
+    }
+
+    #[test]
     fn failures_use_the_reserved_band() {
         // Every non-success status must land at or above 100 and be distinct.
         let statuses = [
@@ -198,6 +211,8 @@ mod tests {
             KpexecStatus::Timeout,
             KpexecStatus::ConfigError,
             KpexecStatus::NotImplemented,
+            KpexecStatus::UserPresenceDenied,
+            KpexecStatus::UserPresenceUnavailable,
             KpexecStatus::Internal,
         ];
         let mut seen = std::collections::BTreeSet::new();

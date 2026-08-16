@@ -2,7 +2,8 @@
 //! suppression, driven end-to-end through the run path against temp vaults.
 //!
 //! NEVER touches the real login keychain. Child targets are helper scripts in
-//! the test temp dir, pinned exactly as `entry add` would. Output is captured via
+//! the test temp dir and explicitly unpinned (pinned mutable paths fail closed).
+//! Output is captured via
 //! in-memory [`kpexec::cmd_run::Emit`] sinks.
 //!
 //! This is a *separate* test binary from `run_path.rs` on purpose: it installs a
@@ -33,7 +34,6 @@ use kpexec::cmd_run::{self, Emit, RunOptions};
 use kpexec::error::Result as KpResult;
 use kpexec::keychain::{FileKeychain, KeychainStore, VaultCredential, account_for};
 use kpexec::lock::VaultLock;
-use kpexec::pin;
 use kpexec::policy::{Command, EnvSpec, OutputSpec, Policy};
 use kpexec::secret::Secret;
 use kpexec::status::Outcome;
@@ -142,11 +142,10 @@ impl Harness {
         if let Some(o) = output {
             policy.output = o;
         }
-        let sha = Some(pin::compute(exe.to_str().unwrap()).unwrap().sha256);
         policy.commands.push(Command {
             name: "cmd".to_string(),
             exe: exe.to_string_lossy().into_owned(),
-            exe_sha256: sha,
+            exe_sha256: None,
             argv_prefix: prefix.iter().map(|s| s.to_string()).collect(),
         });
 

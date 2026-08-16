@@ -217,7 +217,7 @@ fn a1_dry_run_prints_argv_and_never_spawns() {
         "TOKEN",
         &exe,
         &["run"],
-        true,
+        false,
         None,
         None,
     );
@@ -250,7 +250,7 @@ fn a1_dry_run_json_envelope() {
         "TOKEN",
         &exe,
         &["p"],
-        true,
+        false,
         None,
         None,
     );
@@ -295,7 +295,7 @@ fn a2_unknown_command() {
         "TOKEN",
         &exe,
         &["p"],
-        true,
+        false,
         None,
         None,
     );
@@ -357,7 +357,7 @@ fn a3_exact_argv_and_env() {
         "INJECTED_TOKEN",
         &exe,
         &["fixed", "prefix"],
-        true,
+        false,
         Some(EnvSpec { set: env }),
         None,
     );
@@ -492,6 +492,44 @@ fn pin_mismatch_rejects_without_executing() {
 }
 
 #[test]
+fn matching_pin_on_user_writable_target_fails_without_executing() {
+    let h = Harness::new();
+    let marker = h.dir.join("RAN-WRITABLE");
+    let exe = h.script(
+        "writable.sh",
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    );
+    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], true, None, None);
+
+    let mut args = h.run_args("e", "cmd");
+    args.json = true;
+    let r = h.run(&args, &default_opts());
+    assert_eq!(r.json()["kpexec_status"], "malformed-policy");
+    assert_eq!(r.ok().exit_code(), 102);
+    assert!(r.stdout.contains("hash-to-exec race"));
+    assert!(!marker.exists(), "an unenforceable pin must never execute");
+}
+
+#[test]
+fn pinned_non_user_writable_platform_binary_runs() {
+    let h = Harness::new();
+    let exe = std::fs::canonicalize("/bin/sh").unwrap();
+    h.add_entry(
+        "e",
+        "s3cr3t-EXAMPLE",
+        "TOKEN",
+        &exe,
+        &["-c", "exit 0"],
+        true,
+        None,
+        None,
+    );
+
+    let r = h.run(&h.run_args("e", "cmd"), &default_opts());
+    assert_eq!(r.ok(), Outcome::ChildExit(0));
+}
+
+#[test]
 fn unpinned_runs_with_warning() {
     let h = Harness::new();
     let exe = h.script("t.sh", "#!/bin/sh\nexit 0\n");
@@ -524,7 +562,7 @@ fn unpinned_runs_with_warning() {
 fn a6_child_exit_code_propagated() {
     let h = Harness::new();
     let exe = h.script("seven.sh", "#!/bin/sh\nexit 7\n");
-    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], true, None, None);
+    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], false, None, None);
 
     let r = h.run(&h.run_args("e", "cmd"), &default_opts());
     assert_eq!(r.ok(), Outcome::ChildExit(7));
@@ -535,7 +573,7 @@ fn a6_signal_killed_child_is_128_plus_n() {
     let h = Harness::new();
     // The child kills itself with SIGKILL (9) -> exit code should be 128+9=137.
     let exe = h.script("selfkill.sh", "#!/bin/sh\nkill -9 $$\n");
-    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], true, None, None);
+    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], false, None, None);
 
     let r = h.run(&h.run_args("e", "cmd"), &default_opts());
     assert_eq!(r.ok(), Outcome::ChildExit(137));
@@ -556,7 +594,7 @@ fn a7_timeout_sigterm_terminates_and_returns_partial_output() {
         "sleeper.sh",
         "#!/bin/sh\necho partial-line 1>&2\nsleep 30\n",
     );
-    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], true, None, None);
+    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], false, None, None);
 
     let mut args = h.run_args("e", "cmd");
     args.json = true;
@@ -593,7 +631,7 @@ fn a7_sigterm_trapping_child_is_sigkilled_after_grace() {
         "stubborn.sh",
         "#!/bin/sh\ntrap '' TERM\necho alive\nsleep 30\n",
     );
-    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], true, None, None);
+    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], false, None, None);
 
     let mut args = h.run_args("e", "cmd");
     args.json = true;
@@ -623,7 +661,7 @@ fn stdin_is_closed_child_reads_eof() {
         "reader.sh",
         "#!/bin/sh\nhead -c 100 >/dev/null 2>&1 && echo EOF-OK\n",
     );
-    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], true, None, None);
+    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], false, None, None);
 
     let opts = fast_opts(Duration::from_secs(5), Duration::from_secs(2));
     let r = h.run(&h.run_args("e", "cmd"), &opts);
@@ -649,7 +687,7 @@ fn byte_limit_truncates_with_marker() {
         "TOKEN",
         &exe,
         &[],
-        true,
+        false,
         None,
         Some(OutputSpec {
             max_stdout_bytes: 5,
@@ -674,6 +712,39 @@ fn byte_limit_truncates_with_marker() {
     assert_eq!(payload.matches('A').count(), 5);
 }
 
+#[test]
+fn byte_limit_redacts_repeated_secrets_across_raw_capture_boundary() {
+    let h = Harness::new();
+    let secret = "boundary-secret-EXAMPLE-0123456789";
+    let exe = h.script(
+        "boundary.sh",
+        "#!/bin/sh\nprintf 'prefix:%s%s%s%s:suffix' \"$TOKEN\" \"$TOKEN\" \"$TOKEN\" \"$TOKEN\"\n",
+    );
+    h.add_entry(
+        "e",
+        secret,
+        "TOKEN",
+        &exe,
+        &[],
+        false,
+        None,
+        Some(OutputSpec {
+            max_stdout_bytes: 40,
+            max_stderr_bytes: 100,
+        }),
+    );
+
+    let mut args = h.run_args("e", "cmd");
+    args.json = true;
+    let r = h.run(&args, &default_opts());
+    assert_eq!(r.ok(), Outcome::ChildExit(0));
+
+    let stdout = r.json()["stdout"].as_str().unwrap().to_string();
+    assert!(!stdout.contains(secret));
+    assert!(stdout.contains("[REDACTED:kpexec]"));
+    assert!(stdout.contains("truncated"));
+}
+
 // ---------------------------------------------------------------------------
 // --json success envelope shape
 // ---------------------------------------------------------------------------
@@ -685,7 +756,7 @@ fn json_success_envelope_shape() {
         "hi.sh",
         "#!/bin/sh\necho out-line\necho err-line 1>&2\nexit 0\n",
     );
-    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], true, None, None);
+    h.add_entry("e", "s3cr3t-EXAMPLE", "TOKEN", &exe, &[], false, None, None);
 
     let mut args = h.run_args("e", "cmd");
     args.json = true;

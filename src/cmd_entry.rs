@@ -1,14 +1,13 @@
 //! `kpexec entry …` — the entry/policy lifecycle handlers.
 //!
-//! Every mutating handler:
-//! 1. prints the pre-M3 mutation warning,
-//! 2. resolves the vault path (config hint) + Keychain store,
-//! 3. takes a write lock (refusing on a KeePassXC lockfile / live kpexec lock),
-//! 4. opens the vault (identity-bound), mutates in memory, and saves atomically.
+//! The dispatcher authorizes every mutation through LocalAuthentication before
+//! entering these handlers. Each handler then resolves the vault path and
+//! Keychain store, takes the write lock, opens the identity-bound vault,
+//! mutates in memory, and saves atomically.
 //!
 //! Wizard fields may be supplied via flags for non-interactive use; the wizard
 //! prompts only for what a flag did not provide. Secrets are read hidden and
-//! held in [`Secret`]; `show` masks the secret ALWAYS.
+//! held in [`crate::secret::Secret`]; `show` masks the secret ALWAYS.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -70,8 +69,6 @@ pub fn add_with(
     keychain: &dyn KeychainStore,
     config_hint: Option<&Path>,
 ) -> Result<Outcome> {
-    vaultctx::warn_no_user_presence();
-
     let id = prompt::read_line("Entry id", args.id.clone())?;
     reject_empty(&id, "entry id")?;
 
@@ -142,8 +139,6 @@ pub fn add_command_with(
     keychain: &dyn KeychainStore,
     config_hint: Option<&Path>,
 ) -> Result<Outcome> {
-    vaultctx::warn_no_user_presence();
-
     let new_commands = collect_commands(&args.commands, args.no_pin)?;
     if new_commands.is_empty() {
         return Err(KpexecError::new(
@@ -194,8 +189,6 @@ pub fn rm_command_with(
     keychain: &dyn KeychainStore,
     config_hint: Option<&Path>,
 ) -> Result<Outcome> {
-    vaultctx::warn_no_user_presence();
-
     let _lock = acquire_write_lock(vault_path)?;
     let mut vault = Vault::open(vault_path, keychain, config_hint)?;
     let view = require_entry(&vault, &args.id)?;
@@ -245,8 +238,6 @@ pub fn set_secret_with(
     keychain: &dyn KeychainStore,
     config_hint: Option<&Path>,
 ) -> Result<Outcome> {
-    vaultctx::warn_no_user_presence();
-
     let secret = prompt::read_secret("New secret (hidden): ", args.secret_stdin)?;
 
     let _lock = acquire_write_lock(vault_path)?;
@@ -284,8 +275,6 @@ pub fn edit_with(
     keychain: &dyn KeychainStore,
     config_hint: Option<&Path>,
 ) -> Result<Outcome> {
-    vaultctx::warn_no_user_presence();
-
     let _lock = acquire_write_lock(vault_path)?;
     let mut vault = Vault::open(vault_path, keychain, config_hint)?;
     let view = require_entry(&vault, &args.id)?;
@@ -327,8 +316,6 @@ pub fn rm_with(
     keychain: &dyn KeychainStore,
     config_hint: Option<&Path>,
 ) -> Result<Outcome> {
-    vaultctx::warn_no_user_presence();
-
     let _lock = acquire_write_lock(vault_path)?;
     let mut vault = Vault::open(vault_path, keychain, config_hint)?;
     require_entry(&vault, id)?;
@@ -530,16 +517,14 @@ pub fn repin(args: EntryRepinArgs) -> Result<Outcome> {
     )
 }
 
-/// Testable core of `entry repin`. Shows old -> new hash + mtime + size before
-/// the (M3) Touch ID prompt.
+/// Testable core of `entry repin`. After dispatch authorizes the request, this
+/// shows the old -> new hash plus mtime and size before persisting the change.
 pub fn repin_with(
     args: &EntryRepinArgs,
     vault_path: &Path,
     keychain: &dyn KeychainStore,
     config_hint: Option<&Path>,
 ) -> Result<Outcome> {
-    vaultctx::warn_no_user_presence();
-
     let _lock = acquire_write_lock(vault_path)?;
     let mut vault = Vault::open(vault_path, keychain, config_hint)?;
     let view = require_entry(&vault, &args.id)?;
@@ -562,6 +547,7 @@ pub fn repin_with(
             continue;
         }
         let fresh = pin::compute(&cmd.exe)?;
+        pin::require_enforceable(&fresh.canonical)?;
         let old = cmd.exe_sha256.clone();
         // Without a target name, only repin stale/missing pins.
         let is_stale = old.as_deref() != Some(fresh.sha256.as_str());
@@ -657,7 +643,9 @@ fn build_command(name: &str, exe: &str, prefix_raw: &str, no_pin: bool) -> Resul
         );
         None
     } else {
-        Some(pin::compute(exe)?.sha256)
+        let fresh = pin::compute(exe)?;
+        pin::require_enforceable(&fresh.canonical)?;
+        Some(fresh.sha256)
     };
     Ok(Command {
         name: name.to_string(),
@@ -696,4 +684,47 @@ fn reject_duplicate_command_names(policy: &Policy) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn default_pinning_rejects_user_replaceable_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("tool");
+        std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = build_command("c", exe.to_str().unwrap(), "arg one", false).unwrap_err();
+        assert_eq!(err.status(), KpexecStatus::MalformedPolicy);
+        assert!(err.message().contains("hash-to-exec race"));
+        assert!(err.message().contains("--no-pin"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_no_pin_preserves_mutable_executable_opt_out() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("tool");
+        std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let command = build_command("c", exe.to_str().unwrap(), "arg one", true).unwrap();
+        assert!(command.exe_sha256.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_pinning_accepts_non_user_writable_platform_binary() {
+        let exe = std::fs::canonicalize("/bin/sh").unwrap();
+        let command = build_command("c", exe.to_str().unwrap(), "-c 'exit 0'", false).unwrap();
+        assert!(command.exe_sha256.is_some());
+    }
 }

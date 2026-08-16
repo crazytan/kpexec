@@ -93,6 +93,56 @@ pub fn is_current(exe: &str, recorded: &str) -> Result<bool> {
     Ok(pin.sha256.eq_ignore_ascii_case(recorded))
 }
 
+/// Whether the current Unix security principal can change `canonical` in place
+/// or replace any component of its canonical pathname.
+///
+/// Ownership counts as mutable even when current mode bits are read-only,
+/// because an owner can chmod before modifying. Writable ACLs or group/other
+/// mode bits are caught by `access(2)`. A pinned path must return `false` here:
+/// macOS has no public descriptor-based exec, so a mutable pathname would leave
+/// an unavoidable hash-to-exec race.
+#[cfg(unix)]
+pub fn is_mutable_by_current_user(canonical: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+
+    // SAFETY: getuid(2) has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+
+    canonical.ancestors().any(|path| {
+        if std::fs::metadata(path).is_ok_and(|metadata| metadata.uid() == uid) {
+            return true;
+        }
+        let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            // Unix paths cannot contain NUL, but fail closed if an exotic
+            // platform representation ever violates that assumption.
+            return true;
+        };
+        // SAFETY: `path` is a live NUL-terminated C string and `W_OK` is a valid
+        // access(2) mode.
+        unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+    })
+}
+
+#[cfg(not(unix))]
+pub fn is_mutable_by_current_user(_canonical: &Path) -> bool {
+    true
+}
+
+/// Reject a pin that cannot be safely enforced at execution time.
+pub fn require_enforceable(canonical: &Path) -> Result<()> {
+    if is_mutable_by_current_user(canonical) {
+        return Err(KpexecError::new(
+            crate::status::KpexecStatus::MalformedPolicy,
+            format!(
+                "pinned executable {} is writable or replaceable by the current user, so its pin cannot be enforced without a hash-to-exec race; install it under an admin-owned immutable path or explicitly author the command with --no-pin",
+                canonical.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -160,5 +210,21 @@ mod tests {
         let via_real = compute(real.to_str().unwrap()).unwrap();
         assert_eq!(via_link.sha256, via_real.sha256);
         assert_eq!(via_link.canonical, via_real.canonical);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_owned_path_is_not_enforceable_even_when_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("tool");
+        std::fs::write(&exe, b"payload").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let canonical = std::fs::canonicalize(&exe).unwrap();
+
+        assert!(is_mutable_by_current_user(&canonical));
+        let err = require_enforceable(&canonical).unwrap_err();
+        assert_eq!(err.status(), crate::status::KpexecStatus::MalformedPolicy);
     }
 }

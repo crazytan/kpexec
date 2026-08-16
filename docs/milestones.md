@@ -14,8 +14,8 @@ These validate assumptions the design leans on. If one fails, the design changes
 - **M1 — CLI skeleton:** clap command tree, config loading (untrusted-hint semantics), structured errors, logging with the never-log rules, `doctor` (config + filesystem checks only).
 - **M2 — vault lifecycle:** `init` (create kdbx, Keychain item with `{password, db_path}` value, one-time recovery key), `entry add/add-command/rm-command/set-secret/edit/rm/list/show/repin` (pins computed at authoring), `check` incl. stale-pin detection, write locking + atomic replace, KeePassXC-lockfile detection.
 - **M3 — hardening:** LocalAuthentication gate on all mutating commands, Keychain ACL/partition-list binding, signed + hardened-runtime + notarized build of kpexec itself, `doctor` checks for ACL binding and code signature.
-- **M4 — run path:** template resolution, argv construction, `exe_sha256` verification immediately before exec, defined env baseline + `env.set`, no-shell subprocess execution, closed stdin, timeout (SIGTERM → SIGKILL), exit-code propagation, `--dry-run`, `--json`.
-- **M5 — output handling:** buffered capture, byte limits, redaction (exact/JSON/shell/URL-encoded forms), fail-closed suppression.
+- **M4 — run path:** template resolution, argv construction, `exe_sha256` verification with mutable-path rejection before exec, defined env baseline + `env.set`, no-shell subprocess execution, closed stdin, timeout (SIGTERM → SIGKILL), exit-code propagation, `--dry-run`, `--json`.
+- **M5 — output handling:** bounded retained capture while draining to EOF, byte limits, redaction (exact/JSON/shell/URL-encoded forms), fail-closed suppression.
 - **M6 — end-to-end demo & release:** real-CLI walkthrough (e.g. `gh` with a minimally scoped token), full acceptance suite green, notarized release artifact.
 
 ## Acceptance tests
@@ -30,7 +30,7 @@ Functional:
 - **A6** Child exit codes propagate verbatim; kpexec-level failures use the 100+ band and are distinguishable via `--json`.
 - **A7** Timeout: child gets SIGTERM, then SIGKILL after 5 s; partial output is redacted and returned with a timeout status.
 - **A8** Concurrent mutation is serialized by the write lock; a stale lock (dead PID) is reclaimed; a crash mid-write leaves the original vault intact.
-- **A9** `doctor` warns on: credential env var names in project `.env*` files, unpinned (`--no-pin`) commands, stale pins, config/Keychain `db_path` disagreement.
+- **A9** `doctor` warns on credential env var names in project `.env*` files, unpinned (`--no-pin`) commands, stale pins, and config/Keychain `db_path` disagreement; `check` fails legacy or hand-edited pins whose paths the current principal can replace.
 - **A10** A tampered target binary (bytes changed since pinning) is rejected with `exe-hash-mismatch`; no secret is read, no subprocess runs.
 - **A11** After a legitimate binary upgrade, `entry repin` (Touch ID) shows old → new hash and restores runs; repinning without user presence fails.
 
@@ -52,6 +52,6 @@ Deliberately out of V1 scope, in rough priority order:
 1. **Trailing-argument + cwd constraints** — closes the endpoint-redirection exfiltration path; schema hook reserved (`args`, `cwd`).
 2. **Remote approval** — per-run human gate (Telegram or similar); restores the human-in-the-loop for execution, not just authoring.
 3. **Secure Enclave policy signing** — authorization integrity that survives master-password leakage.
-4. **Streaming output** — requires chunk-boundary-safe redaction; V1 is fully buffered.
+4. **Streaming output emission** — V1 drains continuously but emits only after bounded capture and redaction complete.
 5. **Daemon / short-lived unlock sessions** — amortizes the per-invocation Argon2 cost if it proves painful in practice.
 6. **MCP server mode**, non-KeePass vaults, non-macOS platforms.

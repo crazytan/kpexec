@@ -3,14 +3,17 @@
 //! rewrites it — including kpexec's custom string fields.
 //!
 //! Usage:
-//!   kdbx-roundtrip create <path>   create vault with a kpexec-shaped entry
-//!   kdbx-roundtrip modify <path>   re-open, add a second entry, save again
-//!   kdbx-roundtrip verify <path>   open and dump kpexec entries, check fields
+//!
+//! ```text
+//! kdbx-roundtrip create <path>   create vault with a kpexec-shaped entry
+//! kdbx-roundtrip modify <path>   re-open, add a second entry, save again
+//! kdbx-roundtrip verify <path>   open and dump kpexec entries, check fields
+//! ```
 
 use std::fs::File;
 use std::process::exit;
 
-use keepass::{config::DatabaseVersion, db::fields, Database, DatabaseKey};
+use keepass::{Database, DatabaseKey, config::DatabaseVersion, db::fields};
 
 const MASTER_PASSWORD: &str = "spike-master-password";
 const SECRET: &str = "s3cr3t-EXAMPLE-token-1234";

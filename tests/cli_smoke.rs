@@ -1,10 +1,12 @@
 //! Smoke tests: every subcommand in the CLI design doc must parse, and the
-//! not-implemented stubs must fail through the structured error path.
+//! sensitive maintenance commands must fail closed at the authorization gate.
 
 use clap::Parser;
 use kpexec::cli::{Cli, Command, DbCommand, EntryCommand};
 use kpexec::commands;
+use kpexec::error::{KpexecError, Result as KpexecResult};
 use kpexec::status::KpexecStatus;
+use kpexec::user_presence::UserPresence;
 
 /// Parse an argv (excluding the program name) into a [`Cli`].
 fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
@@ -127,23 +129,27 @@ fn unknown_subcommand_is_rejected() {
 }
 
 #[test]
-fn db_maintenance_commands_return_not_implemented_cleanly() {
-    // db rotate/show stay M3. The rest of the entry/init/check surface is
-    // implemented in M2 and is exercised via the integration tests against a
-    // temp vault + fake keychain (see tests/vault_lifecycle.rs).
-    let stub_args: &[&[&str]] = &[&["db", "rotate-password"], &["db", "show-password"]];
-    for args in stub_args {
+fn db_maintenance_commands_are_presence_gated_before_io() {
+    struct Deny;
+    impl UserPresence for Deny {
+        fn authorize(&self, _reason: &str) -> KpexecResult<()> {
+            Err(KpexecError::new(
+                KpexecStatus::UserPresenceDenied,
+                "test denial",
+            ))
+        }
+    }
+
+    // An injected denial proves these commands reach neither the real macOS
+    // authentication sheet nor config, vault, or Keychain I/O in this test.
+    let sensitive_args: &[&[&str]] = &[&["db", "rotate-password"], &["db", "show-password"]];
+    for args in sensitive_args {
         let cli = parse(args).unwrap();
-        let err = commands::dispatch(cli.command).unwrap_err();
+        let err = commands::dispatch_with_user_presence(cli.command, &Deny).unwrap_err();
         assert_eq!(
             err.status(),
-            KpexecStatus::NotImplemented,
-            "expected not-implemented for {args:?}"
-        );
-        assert!(
-            err.message().contains("milestone"),
-            "message should name a milestone for {args:?}: {}",
-            err.message()
+            KpexecStatus::UserPresenceDenied,
+            "expected user-presence denial for {args:?}"
         );
     }
 }

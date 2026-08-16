@@ -664,12 +664,14 @@ dependencies = [
 name = "kpexec"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "clap",
  "dirs",
  "keepass",
  "libc",
  "rand",
  "rpassword",
+ "rust-argon2",
  "secrecy",
  "security-framework",
  "serde",

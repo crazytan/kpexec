@@ -10,7 +10,7 @@
 //!
 //! * treats a missing file as the normal "not initialized" state (defaults),
 //! * warns on unknown keys instead of failing (forward compatibility),
-//! * reports parse failures as [`KpexecStatus::ConfigError`], and
+//! * reports parse failures as [`crate::status::KpexecStatus::ConfigError`], and
 //! * has no env-var overrides (the file is the only input).
 
 use std::path::{Path, PathBuf};

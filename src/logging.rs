@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use sha2::{Digest, Sha256};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::{self, FilterExt};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
 use crate::error::Result;
 use crate::paths;
@@ -31,6 +33,8 @@ use crate::status::KpexecStatus;
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
 /// Number of rotated files to keep (`kpexec.log.1` .. `kpexec.log.3`).
 const KEEP_ROTATED: usize = 3;
+/// Audit records must not be suppressible through the caller's `RUST_LOG`.
+const AUDIT_TARGET: &str = "kpexec::audit";
 
 /// Compute the argv hash the audit log records instead of the raw argv.
 ///
@@ -78,7 +82,7 @@ pub fn log_run_result(
     status: KpexecStatus,
 ) {
     tracing::info!(
-        target: "kpexec::audit",
+        target: AUDIT_TARGET,
         entry_id,
         command_name,
         canonical_exe = %canonical_exe.display(),
@@ -226,15 +230,32 @@ pub fn init_at(path: PathBuf, max_bytes: u64, keep: usize) {
     };
     let shared = SharedWriter(std::sync::Arc::new(Mutex::new(writer)));
 
-    // Default to info; honor RUST_LOG for local debugging only.
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // Default to info; honor RUST_LOG for local debugging. Audit events have a
+    // separate allow rule so even an ambient `RUST_LOG=warn` (or an explicit
+    // `kpexec::audit=off`) cannot suppress the advisory run trail.
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let subscriber = subscriber(shared, env_filter);
+    let _ = tracing::subscriber::set_global_default(subscriber);
+}
 
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(shared)
-        .with_ansi(false)
-        .with_target(true)
-        .try_init();
+fn subscriber(
+    writer: SharedWriter,
+    env_filter: EnvFilter,
+) -> impl tracing::Subscriber + Send + Sync {
+    let audit_filter = filter::filter_fn(|metadata| {
+        metadata.is_event()
+            && metadata.target() == AUDIT_TARGET
+            && *metadata.level() == tracing::Level::INFO
+    });
+    let filter = env_filter.or(audit_filter);
+
+    tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_target(true)
+            .with_filter(filter),
+    )
 }
 
 #[cfg(test)]
@@ -284,5 +305,49 @@ mod tests {
         assert!(path.with_file_name("kpexec.log.1").exists());
         // .4 must never exist (keep = 3).
         assert!(!path.with_file_name("kpexec.log.4").exists());
+    }
+
+    #[test]
+    fn caller_filter_cannot_suppress_audit_and_still_controls_debug_logging() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kpexec.log");
+        let writer = RotatingWriter::open(path.clone(), 1024 * 1024, 1).unwrap();
+        let shared = SharedWriter(std::sync::Arc::new(Mutex::new(writer)));
+
+        // Include both a broad OFF directive and increasingly specific audit
+        // directives to prove the independent allow rule wins. At the same
+        // time, retain a normal per-target DEBUG directive as the legitimate
+        // local-debugging control.
+        let env_filter = EnvFilter::new(
+            "off,kpexec::debug=debug,kpexec::audit=off,kpexec::audit[{entry_id}]=off",
+        );
+        let subscriber = subscriber(shared, env_filter);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(target: "kpexec::debug", "debug-details");
+            tracing::trace!(target: "kpexec::debug", "trace-details");
+            log_run_result(
+                "entry-1",
+                "command-1",
+                Path::new("/usr/bin/true"),
+                "argv-hash",
+                KpexecStatus::Success,
+            );
+        });
+
+        let log = fs::read_to_string(path).unwrap();
+        assert!(
+            log.contains("kpexec::audit"),
+            "audit event missing: {log:?}"
+        );
+        assert!(log.contains("entry-1"), "audit fields missing: {log:?}");
+        assert!(
+            log.contains("debug-details"),
+            "explicit debug directive was not honored: {log:?}"
+        );
+        assert!(
+            !log.contains("trace-details"),
+            "debug directive unexpectedly enabled trace logging: {log:?}"
+        );
     }
 }

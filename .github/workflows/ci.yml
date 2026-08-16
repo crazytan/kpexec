@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep the hostile ambient setting that originally suppressed audit records;
+  # the suite proves the dedicated audit target remains unsuppressible.
+  RUST_LOG: warn
+
+jobs:
+  test:
+    name: Rust ${{ matrix.rust }}
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        rust:
+          - 1.96.0
+          - stable
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Install Rust ${{ matrix.rust }}
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint all targets
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Test all targets
+        run: cargo test --locked --all-targets --all-features
+
+      - name: Test release profile
+        if: matrix.rust == 'stable'
+        run: cargo test --release --locked --all-targets --all-features
+
+      - name: Install RustSec audit tool
+        if: matrix.rust == 'stable'
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      - name: Audit locked dependencies
+        if: matrix.rust == 'stable'
+        shell: bash
+        run: |
+          set -euo pipefail
+          advisory_db="$RUNNER_TEMP/rustsec-advisory-db"
+          git clone --depth 1 https://github.com/RustSec/advisory-db.git "$advisory_db"
+          cargo audit --no-fetch --db "$advisory_db" --deny warnings
+          cargo audit --no-fetch --db "$advisory_db" --deny warnings --file spikes/kdbx-roundtrip/Cargo.lock
+
+      - name: Build documentation with warnings denied
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --all-features --no-deps
+
+      - name: Check KDBX spike formatting
+        run: cargo fmt --manifest-path spikes/kdbx-roundtrip/Cargo.toml -- --check
+
+      - name: Lint KDBX spike
+        run: >-
+          cargo clippy
+          --manifest-path spikes/kdbx-roundtrip/Cargo.toml
+          --locked
+          --all-targets
+          -- -D warnings
+
+      - name: Build KDBX spike documentation with warnings denied
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: >-
+          cargo doc
+          --manifest-path spikes/kdbx-roundtrip/Cargo.toml
+          --locked
+          --no-deps
+
+      - name: Exercise KDBX round trip
+        shell: bash
+        run: |
+          set -euo pipefail
+          vault="$RUNNER_TEMP/kpexec-spike.kdbx"
+          cargo run --quiet --manifest-path spikes/kdbx-roundtrip/Cargo.toml --locked -- create "$vault"
+          cargo run --quiet --manifest-path spikes/kdbx-roundtrip/Cargo.toml --locked -- modify "$vault"
+          cargo run --quiet --manifest-path spikes/kdbx-roundtrip/Cargo.toml --locked -- verify "$vault"
+
+      - name: Install ShellCheck
+        if: matrix.rust == 'stable'
+        run: brew install shellcheck
+
+      - name: Check spike shell scripts
+        if: matrix.rust == 'stable'
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts=(
+            spikes/keychain-acl/run-tests.sh
+            spikes/local-auth/run-tests.sh
+            spikes/signing/notarize.sh
+            spikes/signing/sign.sh
+          )
+          bash -n "${scripts[@]}"
+          shellcheck "${scripts[@]}"
+
+      - name: Type-check macOS spike probes
+        if: matrix.rust == 'stable'
+        run: |
+          /usr/bin/swiftc -typecheck -framework Security spikes/keychain-acl/kcprobe.swift
+          /usr/bin/swiftc -typecheck -framework LocalAuthentication spikes/local-auth/laprobe.swift

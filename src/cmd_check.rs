@@ -118,12 +118,20 @@ fn check_command_pin(id: &str, policy: &Policy, name: &str, checks: &mut Vec<Che
             None => checks.push(check_warn(format!(
                 "entry {id} command {name}: unpinned (--no-pin); repin to close the tampered-binary hole"
             ))),
-            Some(recorded) if recorded.eq_ignore_ascii_case(&fresh.sha256) => {
-                checks.push(check_ok(format!("entry {id} command {name}: pin current")));
+            Some(recorded) => {
+                if let Err(e) = pin::require_enforceable(&fresh.canonical) {
+                    checks.push(check_fail(format!(
+                        "entry {id} command {name}: {}",
+                        e.message()
+                    )));
+                } else if recorded.eq_ignore_ascii_case(&fresh.sha256) {
+                    checks.push(check_ok(format!("entry {id} command {name}: pin current")));
+                } else {
+                    checks.push(check_warn(format!(
+                        "entry {id} command {name}: pin STALE (binary changed since authoring) — run `kpexec entry repin {id} {name}`"
+                    )));
+                }
             }
-            Some(_) => checks.push(check_warn(format!(
-                "entry {id} command {name}: pin STALE (binary changed since authoring) — run `kpexec entry repin {id} {name}`"
-            ))),
         },
         Err(e) => checks.push(check_fail(format!(
             "entry {id} command {name}: {}",

@@ -35,8 +35,17 @@ unacceptable to you, please open an issue to discuss before contributing.
 
 ## Quality gates
 
-Before requesting review, make sure all three of the following pass:
+Before requesting review, run the same non-interactive gates as CI:
 
-- `cargo test`
-- `cargo clippy --all-targets -- -D warnings`
-- `cargo fmt --check`
+- `cargo fmt --all -- --check`
+- `cargo clippy --locked --all-targets --all-features -- -D warnings`
+- `RUST_LOG=warn cargo test --locked --all-targets --all-features`
+- `RUSTDOCFLAGS="-D warnings" cargo doc --locked --all-features --no-deps`
+- `cargo fmt --manifest-path spikes/kdbx-roundtrip/Cargo.toml -- --check`
+- `cargo clippy --manifest-path spikes/kdbx-roundtrip/Cargo.toml --locked --all-targets -- -D warnings`
+
+CI also checks Rust 1.96, the release test profile, both Swift probes,
+ShellCheck, the KDBX create/modify/verify workflow, and both lockfiles against
+the RustSec advisory database. The prompt-bearing Keychain, LocalAuthentication,
+signing, and notarization spikes remain supervised checks; do not run them in
+unattended CI.

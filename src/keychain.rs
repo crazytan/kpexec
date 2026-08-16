@@ -11,18 +11,20 @@
 //!
 //! Access is behind the [`KeychainStore`] trait so tests can drive a
 //! file-backed fake and NEVER touch the real login keychain. The real macOS
-//! implementation ([`macos::MacKeychain`]) uses plain `SecItemAdd`/
-//! `SecItemCopyMatching`; the ACL / partition-list hardening (Team ID +
-//! identifier binding) is M3.
+//! implementation ([`macos::MacKeychain`]) deliberately reports its binding as
+//! [`AclBinding::Unverified`]: a caller must not infer an anti-substitution
+//! boundary merely because a Keychain read succeeded.
 //!
-//! TODO(M3): bind the item's ACL to the developer Team ID + identifier
-//! `dev.crazytan.kpexec` (partition list) so only the signed kpexec reads it
-//! silently. This module currently adds a plain item.
+//! Until the supervised provisioning matrix proves a supported partition-list
+//! workflow, the production backend fails closed for `get` and `set`. This is
+//! intentionally an availability failure instead of an unproven security
+//! boundary.
 
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{KpexecError, Result};
 use crate::secret::Secret;
@@ -64,6 +66,21 @@ pub struct VaultCredential {
     pub db_path: String,
 }
 
+/// Whether a store can prove that an item was minted with kpexec's required
+/// Team-ID + identifier partition binding.
+///
+/// `Verified` is a security assertion, not an availability result. In
+/// particular, successfully reading an item does not prove its provenance: an
+/// attacker may have planted a readable item. Production callers must not read
+/// a credential after receiving `Unverified`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AclBinding {
+    /// The store has verified the required anti-substitution binding.
+    Verified,
+    /// The store cannot prove the required binding.
+    Unverified,
+}
+
 /// The on-the-wire JSON shape stored as the item value.
 ///
 /// Never `Debug`/`Display`ed with the password populated — this is an internal
@@ -76,8 +93,23 @@ struct StoredValue {
     db_path: String,
 }
 
+impl Drop for StoredValue {
+    fn drop(&mut self) {
+        self.password.zeroize();
+    }
+}
+
 /// Abstraction over the platform Keychain (or a test fake).
 pub trait KeychainStore {
+    /// Check the anti-substitution binding without reading secret data or
+    /// presenting authentication UI.
+    ///
+    /// The conservative default prevents new/test stores from silently being
+    /// treated as a security boundary.
+    fn acl_binding(&self, _account: &str) -> Result<AclBinding> {
+        Ok(AclBinding::Unverified)
+    }
+
     /// Store (or replace) the credential for `account`. Overwrites an existing
     /// item with the same service+account.
     fn set(&self, account: &str, credential: &VaultCredential) -> Result<()>;
@@ -91,30 +123,28 @@ pub trait KeychainStore {
 
 /// Serialize a credential to the stored JSON value. Kept internal; used by both
 /// the real and fake stores so the value shape is identical.
-fn encode(credential: &VaultCredential) -> Result<String> {
+fn encode(credential: &VaultCredential) -> Result<Zeroizing<String>> {
     let stored = StoredValue {
         password: credential.password.expose().to_string(),
         db_path: credential.db_path.clone(),
     };
-    let json = serde_json::to_string(&stored)
-        .map_err(|e| KpexecError::internal(format!("keychain value encode failed: {e}")));
-    // `stored.password` (a plain String) is dropped here; the JSON string it
-    // produced is the caller's responsibility to hand straight to the platform.
-    json
+    serde_json::to_string(&stored)
+        .map(Zeroizing::new)
+        .map_err(|e| KpexecError::internal(format!("keychain value encode failed: {e}")))
 }
 
 /// Parse a stored JSON value back into a credential, moving the password into a
 /// [`Secret`].
 fn decode(value: &str) -> Result<VaultCredential> {
-    let stored: StoredValue = serde_json::from_str(value).map_err(|e| {
+    let mut stored: StoredValue = serde_json::from_str(value).map_err(|e| {
         KpexecError::new(
             KpexecStatus::UnlockFailed,
             format!("keychain item value is not valid kpexec JSON: {e}"),
         )
     })?;
     Ok(VaultCredential {
-        password: Secret::new(stored.password),
-        db_path: stored.db_path,
+        password: Secret::new(std::mem::take(&mut stored.password)),
+        db_path: std::mem::take(&mut stored.db_path),
     })
 }
 
@@ -146,15 +176,24 @@ impl FileKeychain {
 }
 
 impl KeychainStore for FileKeychain {
+    fn acl_binding(&self, _account: &str) -> Result<AclBinding> {
+        // This store is an explicitly injected, hermetic test double. It never
+        // participates in a production path.
+        Ok(AclBinding::Verified)
+    }
+
     fn set(&self, account: &str, credential: &VaultCredential) -> Result<()> {
         let value = encode(credential)?;
-        std::fs::write(self.item_path(account), value)
+        std::fs::write(self.item_path(account), value.as_bytes())
             .map_err(|e| KpexecError::internal(format!("fake keychain write: {e}")))
     }
 
     fn get(&self, account: &str) -> Result<Option<VaultCredential>> {
         match std::fs::read_to_string(self.item_path(account)) {
-            Ok(v) => Ok(Some(decode(&v)?)),
+            Ok(v) => {
+                let value = Zeroizing::new(v);
+                Ok(Some(decode(&value)?))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(KpexecError::new(
                 KpexecStatus::UnlockFailed,
@@ -174,53 +213,36 @@ impl KeychainStore for FileKeychain {
 
 #[cfg(target_os = "macos")]
 pub mod macos {
-    //! The real macOS Keychain implementation (plain generic-password items).
+    //! The macOS Keychain implementation.
 
-    use super::{KeychainStore, SERVICE, VaultCredential, decode, encode};
+    use super::{AclBinding, KeychainStore, SERVICE, VaultCredential};
     use crate::error::{KpexecError, Result};
     use crate::status::KpexecStatus;
-    use security_framework::passwords::{
-        delete_generic_password, get_generic_password, set_generic_password,
-    };
+    use security_framework::passwords::delete_generic_password;
+
+    const UNVERIFIED_ACL: &str = "Keychain ACL hardening is not provisioned: refusing to access vault credentials until the supervised Team-ID + identifier partition-list workflow is validated";
 
     /// The login-keychain-backed store.
     ///
-    /// TODO(M3): switch from `set_generic_password` to an item created with an
-    /// ACL / partition list bound to Team ID `V82M9YX8BR` + identifier
-    /// `dev.crazytan.kpexec`, so only the signed, hardened-runtime kpexec reads
-    /// it silently and any other process triggers a user prompt.
+    /// Credential reads/writes remain disabled until items can be created and
+    /// inspected with the verified Team-ID + identifier partition binding.
     pub struct MacKeychain;
 
     impl KeychainStore for MacKeychain {
-        fn set(&self, account: &str, credential: &VaultCredential) -> Result<()> {
-            let value = encode(credential)?;
-            set_generic_password(SERVICE, account, value.as_bytes()).map_err(|e| {
-                KpexecError::new(
-                    KpexecStatus::UnlockFailed,
-                    format!("keychain set failed: {e}"),
-                )
-            })
+        fn acl_binding(&self, _account: &str) -> Result<AclBinding> {
+            // Neither a successful SecItemCopyMatching nor a path-based
+            // trusted-application ACL proves the required partition-list
+            // provenance. Keep this fail-closed until the supervised T1-T4
+            // matrix establishes a supported creation + inspection workflow.
+            Ok(AclBinding::Unverified)
         }
 
-        fn get(&self, account: &str) -> Result<Option<VaultCredential>> {
-            match get_generic_password(SERVICE, account) {
-                Ok(bytes) => {
-                    let value = String::from_utf8(bytes).map_err(|_| {
-                        KpexecError::new(
-                            KpexecStatus::UnlockFailed,
-                            "keychain item value is not UTF-8",
-                        )
-                    })?;
-                    Ok(Some(decode(&value)?))
-                }
-                // The crate returns an error for "not found"; treat the
-                // errSecItemNotFound code as absence rather than failure.
-                Err(e) if e.code() == -25300 => Ok(None),
-                Err(e) => Err(KpexecError::new(
-                    KpexecStatus::UnlockFailed,
-                    format!("keychain get failed: {e}"),
-                )),
-            }
+        fn set(&self, _account: &str, _credential: &VaultCredential) -> Result<()> {
+            Err(KpexecError::new(KpexecStatus::UnlockFailed, UNVERIFIED_ACL))
+        }
+
+        fn get(&self, _account: &str) -> Result<Option<VaultCredential>> {
+            Err(KpexecError::new(KpexecStatus::UnlockFailed, UNVERIFIED_ACL))
         }
 
         fn delete(&self, account: &str) -> Result<()> {

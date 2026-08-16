@@ -25,6 +25,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use keepass::config::DatabaseVersion;
+use keepass::config::KdfConfig;
 use keepass::db::fields;
 use keepass::{Database, DatabaseKey};
 
@@ -82,6 +83,17 @@ impl Vault {
             path,
             master,
         }
+    }
+
+    /// Create a brand-new empty vault with explicit KDF parameters.
+    ///
+    /// Production `init` uses this after calibrating Argon2id on the local
+    /// machine. Keeping [`Vault::create`] as the inexpensive default makes
+    /// tests and callers that do not need calibration fast.
+    pub fn create_with_kdf(path: PathBuf, master: Secret, kdf_config: KdfConfig) -> Self {
+        let mut db = Database::new();
+        db.config.kdf_config = kdf_config;
+        Vault { db, path, master }
     }
 
     /// Open the vault named by the Keychain item for `path`.
@@ -214,6 +226,15 @@ impl Vault {
                 )))
             }
         }
+    }
+
+    /// Replace the password that will encrypt the next atomic save.
+    ///
+    /// This only changes the in-memory key. Callers must still invoke
+    /// [`Vault::save_atomic`] while holding the vault write lock, and must keep
+    /// the corresponding Keychain credential consistent with that save.
+    pub(crate) fn set_master_password(&mut self, master: Secret) {
+        self.master = master;
     }
 
     /// Read every kpexec entry (those with a `kpexec.id`). Entries without the
@@ -525,6 +546,31 @@ mod tests {
         assert_eq!(view.id, "github");
         assert_eq!(view.policy.commands[0].name, "c1");
         assert!(view.has_secret);
+    }
+
+    #[test]
+    fn explicit_argon2id_parameters_are_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault_path = dir.path().join("calibrated.kdbx");
+        let master = Secret::new("master-EXAMPLE-pw".to_string());
+        let expected = KdfConfig::Argon2id {
+            iterations: 2,
+            // KDBX records this value in bytes; use only 8 KiB here so this
+            // persistence test stays quick.
+            memory: 8 * 1024,
+            parallelism: 1,
+            version: argon2::Version::Version13,
+        };
+
+        let mut vault =
+            Vault::create_with_kdf(vault_path.clone(), master.clone(), expected.clone());
+        vault.save_atomic().unwrap();
+
+        let mut file = File::open(vault_path).unwrap();
+        let reopened =
+            Database::open(&mut file, DatabaseKey::new().with_password(master.expose())).unwrap();
+        assert_eq!(reopened.config.version, DatabaseVersion::KDB4(1));
+        assert_eq!(reopened.config.kdf_config, expected);
     }
 
     #[test]

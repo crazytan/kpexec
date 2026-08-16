@@ -7,6 +7,7 @@
 
 pub mod cli;
 pub mod cmd_check;
+pub mod cmd_db;
 pub mod cmd_entry;
 pub mod cmd_init;
 pub mod cmd_run;
@@ -14,6 +15,7 @@ pub mod commands;
 pub mod config;
 pub mod doctor;
 pub mod error;
+pub mod kdf;
 pub mod keychain;
 pub mod lock;
 pub mod logging;
@@ -25,5 +27,6 @@ pub mod policy;
 pub mod prompt;
 pub mod secret;
 pub mod status;
+pub mod user_presence;
 pub mod vault;
 pub mod vaultctx;

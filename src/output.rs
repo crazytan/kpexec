@@ -1,9 +1,9 @@
 //! The output-processing pipeline (M5: redaction + fail-closed suppression).
 //!
-//! A child's stdout/stderr are captured **fully buffered** (no streaming in V1;
-//! see security-design invariant 10 and the CLI design doc) and then handed to
-//! [`process`], which turns raw [`Captured`] bytes into [`Processed`] strings
-//! ready for emission.
+//! A child's stdout/stderr pipes are drained to EOF without streaming output.
+//! Only a bounded prefix large enough for the policy cap plus redaction
+//! look-ahead is retained and handed to [`process`], which turns raw [`Captured`]
+//! bytes into [`Processed`] strings ready for emission.
 //!
 //! # Pipeline (in order)
 //!
@@ -20,7 +20,7 @@
 //!    [`crate::status::KpexecStatus::RedactionFailure`].
 //! 3. **Byte limiting** — stdout/stderr are truncated at the policy caps, with a
 //!    clear truncation marker. Truncation happens *after* redaction and is not
-//!    allowed to split the marker (see [`truncate_no_split_marker`]).
+//!    allowed to split the marker (see `truncate_no_split_marker`).
 //! 4. **Lossy decode** — the redacted, byte-limited bytes are decoded lossily to
 //!    UTF-8 for the envelope / passthrough. Because redaction ran on the raw
 //!    bytes, a secret hidden inside otherwise-invalid UTF-8 cannot slip past the
@@ -28,10 +28,11 @@
 //!
 //! # Why redact before truncating
 //!
-//! Truncating first could cut a secret occurrence mid-way, leaving a partial
+//! Truncating the retained prefix first could cut a secret occurrence mid-way, leaving a partial
 //! secret that a full-match scan can no longer recognise (the cut fragment is
-//! shorter than any variant). So redaction runs on the full buffer first; only
-//! the already-masked bytes are then length-bounded.
+//! shorter than any variant). So redaction runs on the retained raw prefix
+//! (including its calculated look-ahead) first; only the already-masked bytes
+//! are then cut to the policy cap.
 //!
 //! # The `[REDACTED:kpexec]` marker
 //!
@@ -43,6 +44,7 @@
 
 use crate::policy::OutputSpec;
 use crate::secret::Secret;
+use zeroize::{Zeroize, Zeroizing};
 
 /// The fixed marker that replaces every detected secret occurrence.
 ///
@@ -71,10 +73,19 @@ pub const TRUNCATION_MARKER: &str = "\n[kpexec] ...output truncated (byte limit 
 /// Raw child output as captured from the pipes, before any processing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Captured {
-    /// Raw stdout bytes, read to EOF.
+    /// Bounded raw stdout prefix; the pipe itself is still drained to EOF.
     pub stdout: Vec<u8>,
-    /// Raw stderr bytes, read to EOF.
+    /// Bounded raw stderr prefix; the pipe itself is still drained to EOF.
     pub stderr: Vec<u8>,
+}
+
+impl Drop for Captured {
+    fn drop(&mut self) {
+        // A child can echo the injected credential before redaction. Scrub the
+        // retained raw prefixes even on an early/fail-closed return.
+        self.stdout.zeroize();
+        self.stderr.zeroize();
+    }
 }
 
 /// Processed output ready for emission (redacted, byte-limited, decoded).
@@ -98,10 +109,20 @@ pub struct Processed {
 /// limit, decode.
 ///
 /// The secret is borrowed (never stored) and its plaintext is exposed only
-/// inside [`secret_variants`]; this function holds no owned copy of the secret
+/// inside `secret_variants`; this function holds no owned copy of the secret
 /// bytes beyond the transient variant list, which is dropped on return.
 pub fn process(captured: Captured, limits: &OutputSpec, secret: &Secret) -> Processed {
     process_with_bound(captured, limits, secret, MAX_REDACTION_PASSES)
+}
+
+/// Longest encoded secret form the raw capture layer must retain past a policy
+/// byte cap so a variant crossing that boundary can still be redacted whole.
+pub(crate) fn max_secret_variant_len(secret: &Secret) -> usize {
+    secret_variants(secret)
+        .iter()
+        .map(|variant| variant.len())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Core of [`process`] with the fixpoint iteration bound made explicit.
@@ -185,15 +206,15 @@ fn process_with_bound(
 ///   backslash-escaped (as `printf %q`-style quoting would render them).
 ///
 /// The exposed plaintext lives only for the body of this function; the returned
-/// `Vec<Vec<u8>>` is owned bytes, and the caller drops it after redaction.
-pub fn secret_variants(secret: &Secret) -> Vec<Vec<u8>> {
+/// [`SecretVariants`] owns and zeroizes every generated form on drop.
+pub(crate) fn secret_variants(secret: &Secret) -> SecretVariants {
     // The one and only expose() in this module. Copied into a local byte vec so
     // all variant computation works on bytes; the borrow does not outlive here.
-    let raw: Vec<u8> = secret.expose().as_bytes().to_vec();
+    let raw = Zeroizing::new(secret.expose().as_bytes().to_vec());
 
     let mut variants: Vec<Vec<u8>> = Vec::with_capacity(6);
     // exact
-    variants.push(raw.clone());
+    variants.push(raw.to_vec());
     // JSON-escaped (body of a serde_json string literal)
     variants.push(json_escaped_body(&raw));
     // URL percent-encoded, both hex cases
@@ -210,18 +231,43 @@ pub fn secret_variants(secret: &Secret) -> Vec<Vec<u8>> {
     dedup_bytes(variants)
 }
 
-/// Deduplicate a list of byte vectors, preserving first-seen order.
-fn dedup_bytes(mut variants: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
-    let mut seen: Vec<Vec<u8>> = Vec::with_capacity(variants.len());
-    variants.retain(|v| {
-        if seen.iter().any(|s| s == v) {
-            false
-        } else {
-            seen.push(v.clone());
-            true
+/// Owned encoded forms of a secret. Clones are also scrubbed on drop.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SecretVariants(Vec<Vec<u8>>);
+
+impl std::ops::Deref for SecretVariants {
+    type Target = Vec<Vec<u8>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SecretVariants {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for SecretVariants {
+    fn drop(&mut self) {
+        for variant in &mut self.0 {
+            variant.zeroize();
         }
-    });
-    variants
+    }
+}
+
+/// Deduplicate a list of byte vectors, preserving first-seen order.
+fn dedup_bytes(variants: Vec<Vec<u8>>) -> SecretVariants {
+    let mut unique: Vec<Vec<u8>> = Vec::with_capacity(variants.len());
+    for mut variant in variants {
+        if unique.iter().any(|seen| seen == &variant) {
+            variant.zeroize();
+        } else {
+            unique.push(variant);
+        }
+    }
+    SecretVariants(unique)
 }
 
 /// The body of a serde_json string literal (surrounding quotes removed).
@@ -237,7 +283,7 @@ fn json_escaped_body(raw: &[u8]) -> Vec<u8> {
         Ok(s) => {
             let quoted = serde_json::to_string(s).unwrap_or_else(|_| String::new());
             // Strip the surrounding quotes serde_json added.
-            let bytes = quoted.into_bytes();
+            let bytes = Zeroizing::new(quoted.into_bytes());
             if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
                 bytes[1..bytes.len() - 1].to_vec()
             } else {
