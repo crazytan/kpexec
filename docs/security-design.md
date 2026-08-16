@@ -48,7 +48,7 @@
   cause a duplicate, disappearance, or wrong-partition result, but each fails before a
   read. If reference resolution fails after successful creation, kpexec performs
   best-effort exact-service/account cleanup rather than stranding the credential.
-- **Distribution requirements** for the gate to be real: release binaries must be Developer ID–signed with **hardened runtime** (blocks ptrace/dylib injection into the process holding the password in memory) and notarized. Self-built, ad-hoc, wrong-identifier, or wrong-team binaries are rejected by kpexec's own code-signing requirement before Keychain data access; the Keychain's ordinary application ACL is a second enforcement layer.
+- **Distribution requirements** for the gate to be real: release binaries must be Developer ID–signed with **hardened runtime** (blocks ptrace/dylib injection into the process holding the password in memory), and the distributed installer package must be notarized. Self-built, ad-hoc, wrong-identifier, or wrong-team binaries are rejected by kpexec's own code-signing requirement before Keychain data access; the Keychain's ordinary application ACL is a second enforcement layer. The installed bare CLI is not an app bundle, so Gatekeeper may decline an executable assessment with `code is valid but does not seem to be an app`; doctor warns in that case, while the stapled package and its `spctl --type install` assessment remain the authoritative notarization evidence.
 - **Signing-oracle isolation:** mutable workspace code is never signed into the
   production Developer ID trust domain. T1–T4 and LocalAuthentication use fixed
   Apple Development identities plus isolated `.spike` identifiers. T5 is absent

@@ -81,7 +81,10 @@ stages; preparation does neither.
 
 Then install the package on a clean macOS account and rerun `kpexec doctor`.
 The clean-account install, credential prompts, and Apple submission verdict
-remain human gates.
+remain human gates. An installed bare CLI may produce doctor's not-applicable
+Gatekeeper warning (`code is valid but does not seem to be an app`); accept
+that warning only when the exact installer package has passed the runbook's
+staple validation and `spctl --type install` assessment.
 
 ## 6. Run the final acceptance pass
 
@@ -100,5 +103,7 @@ On the installed artifact:
 
 Ship only when CI is required on protected `main`, T1–T5 and the LocalAuth SSH
 leg are recorded as passing, the production Keychain boundary still passes on
-the release candidate, a notarized package passes Gatekeeper on a clean account,
-and A1–A16 plus the disposable-token demo are green.
+the release candidate, the exact notarized installer package passes Gatekeeper
+on a clean account, and A1–A16 plus the disposable-token demo are green. A bare
+CLI executable's not-applicable Gatekeeper warning neither blocks this gate nor
+substitutes for package verification.
