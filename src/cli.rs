@@ -127,13 +127,13 @@ pub enum EntryCommand {
     Repin(EntryRepinArgs),
 }
 
-/// A single `--command name=<n>,exe=<path>,prefix=<shell words>` value.
+/// A single `--command name=<n>;exe=<path>;prefix=<shell words>` value.
 ///
 /// Command templates may be supplied non-interactively via repeated
 /// `--command` flags (a deliberate extension so tests/scripts run without a
-/// TTY). Format is comma-separated `key=value` pairs; `prefix` uses shell-word
-/// quoting so commas inside a quoted arg are preserved by splitting on the
-/// first `=` per key. Recognized keys: `name`, `exe`, `prefix`.
+/// TTY). Format is semicolon-separated `key=value` pairs; `prefix` uses
+/// shell-word quoting, and each pair is split on only its first `=`.
+/// Recognized keys: `name`, `exe`, `prefix`.
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
     /// The command name.

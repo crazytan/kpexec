@@ -44,7 +44,10 @@ Functional:
 - **A6** Child exit codes propagate verbatim; kpexec-level failures use the 100+ band and are distinguishable via `--json`.
 - **A7** Timeout: child gets SIGTERM, then SIGKILL after 5 s; partial output is redacted and returned with a timeout status.
 - **A8** Concurrent mutation is serialized by the write lock; a stale lock (dead PID) is reclaimed; a crash mid-write leaves the original vault intact.
-- **A9** `doctor` warns on credential env var names in project `.env*` files, unpinned (`--no-pin`) commands, stale pins, and config/Keychain `db_path` disagreement; `check` fails legacy or hand-edited pins whose paths the current principal can replace.
+- **A9** `doctor` warns on credential env var names in project `.env*` files,
+  unpinned (`--no-pin`) commands, and stale pins; config/Keychain `db_path`
+  disagreement fails closed. `check` fails legacy or hand-edited pins whose
+  paths the current principal can replace.
 - **A10** A tampered target binary (bytes changed since pinning) is rejected with `exe-hash-mismatch`; no secret is read, no subprocess runs.
 - **A11** After a legitimate binary upgrade, `entry repin` (Touch ID) shows old → new hash and restores runs; repinning without user presence fails.
 

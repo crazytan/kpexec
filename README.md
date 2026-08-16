@@ -19,33 +19,35 @@ remain openable in KeePassXC. kpexec is currently macOS-only.
 
 kpexec is an experimental, pre-release implementation. The CLI, KDBX vault
 lifecycle, executable pinning, policy checks, constrained subprocess runner,
-output redaction, the LocalAuthentication user-presence gate, and the vault
-password maintenance commands and platform credential boundary are implemented.
-The platform behavior has been supervised on macOS 26.6.1. The original probes
-were signed too broadly; the current isolated Apple Development harnesses must
-be rerun before their results count as ship evidence:
+output redaction, LocalAuthentication user-presence gate, vault-password
+maintenance commands, and platform credential boundary are implemented.
 
-- every vault mutation and recovery-password display is gated by Touch ID or
-  the macOS account-password fallback; the signed production path has been
-  supervised successfully with account-password approval and fail-closed SSH
-  rejection before any GUI sheet;
-- production Keychain credential access now verifies the exact signed identity
-  and singleton Team-ID partition before reading or updating the same item
-  reference; historical planted-item and Rust lifecycle runs passed, with a
-  safe isolated-profile rerun still required for ship evidence;
-- release packaging, notarization, and clean-account acceptance are still
-  pending.
+The protected `main` build at `47bd556` passed both required CI jobs. Safe,
+isolated Apple Development harnesses passed the Keychain T1–T5 and interactive
+plus SSH LocalAuthentication matrices on macOS 26.6.1. A package from that
+commit was Developer ID signed, notarized, stapled, Gatekeeper accepted,
+installed, and correlated byte-for-byte with its payload; the initialized
+production `doctor` report passed. Installed acceptance also exercised denied
+mutation, stale-pin rejection and approved repinning, rollback audit behavior,
+and a live disposable GitHub token without exposing the token in captured
+output or artifacts.
 
-Until a notarized release artifact passes the remaining ship gates, a locally
-built binary must not be treated as a complete security boundary against an
-untrusted local agent. See
-[Milestones](docs/milestones.md) for the remaining supervised acceptance work.
+Those results are a verified pre-final baseline, not a published release. The
+isolated platform results were recorded at `a11564c` and apply to later commits
+only while the relevant Keychain, LocalAuthentication, and signing boundaries
+remain unchanged. The package at `47bd556` also predates the final macOS 15
+deployment-target and acceptance-test changes. The final candidate must be
+rebuilt, notarized, installed, and checked before publication. See the
+[v0.1.0 release evidence](docs/release-evidence-v0.1.0.md) for exact hashes and
+remaining gates.
+
+Until the exact final notarized artifact passes those gates, a locally built
+binary must not be treated as a complete security boundary against an untrusted
+local agent.
 
 ## Requirements
 
-- Apple silicon Mac (the initial package targets macOS 11, but that minimum
-  still requires release-candidate runtime validation before it is advertised
-  as supported)
+- Apple silicon Mac running macOS 15 or newer (the initial package is arm64-only)
 - Rust 1.96 or newer
 - Xcode Command Line Tools
 
@@ -71,13 +73,13 @@ cargo install --path . --locked
 
 Both commands produce an unsigned development build. The production Keychain
 backend rejects it because it does not satisfy kpexec's exact Developer ID
-requirement; there is not yet a notarized release artifact.
+requirement. No release artifact has been published yet.
 
 ## Basic use
 
 The workflow below is the intended CLI flow. Unsigned local builds intentionally
 fail the production Keychain identity check; use the release signing workflow for
-an end-to-end local validation. No notarized release artifact is published yet.
+an end-to-end local validation. No release artifact is published yet.
 
 Initialize the dedicated vault, then use the entry wizard to store a credential
 and define one or more allowed command templates:
@@ -106,6 +108,7 @@ the policy's fixed argument prefix; kpexec does not invoke a shell. Run
 - [Milestones](docs/milestones.md) — de-risking spikes, implementation milestones, acceptance tests
 - [MVP ship checklist](docs/mvp-ship-checklist.md) — remaining platform work, release build, and final acceptance pass
 - [Release runbook](docs/release.md) — staged build, signing, packaging, notarization, and verification
+- [v0.1.0 release evidence](docs/release-evidence-v0.1.0.md) — verified pre-final results and final-candidate ledger
 
 ## License
 

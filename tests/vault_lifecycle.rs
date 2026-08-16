@@ -8,18 +8,21 @@
 //! db_path mismatch, secret masking in show, and the <8-char secret refusal.
 
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use kpexec::cli::{
     CommandSpec, EntryAddCommandArgs, EntryRepinArgs, EntryRmCommandArgs, EntrySetSecretArgs,
-    EntryShowArgs, InitArgs,
+    EntryShowArgs, InitArgs, RunArgs,
 };
+use kpexec::cmd_run::{self, Emit, RunOptions};
 use kpexec::error::{KpexecError, Result};
 use kpexec::keychain::{FileKeychain, KeychainStore, VaultCredential, account_for};
 use kpexec::lock::VaultLock;
 use kpexec::pin;
 use kpexec::secret::Secret;
-use kpexec::status::KpexecStatus;
+use kpexec::status::{KpexecStatus, Outcome};
 use kpexec::vault::{Vault, canonical_or_lexical};
 use kpexec::{cmd_check, cmd_entry, cmd_init};
 
@@ -426,6 +429,114 @@ fn set_secret_rotates_and_short_secret_refused() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn repin_replaces_stale_hash_and_restores_run() {
+    use kpexec::policy::{Command, Policy};
+
+    let h = Harness::new();
+    h.init();
+    let shell = std::fs::canonicalize("/bin/sh").unwrap();
+
+    // Model an on-disk executable upgrade without modifying an OS-owned file:
+    // the policy carries the old bytes' hash while /bin/sh represents the new,
+    // admin-owned executable currently installed at that canonical path.
+    let mut policy = Policy::new("repin acceptance".into(), "TOKEN".into(), None);
+    policy.commands.push(Command {
+        name: "exit-zero".into(),
+        exe: shell.to_string_lossy().into_owned(),
+        exe_sha256: Some("00".repeat(32)),
+        argv_prefix: vec!["-c".into(), "exit 0".into()],
+    });
+    let cred = h
+        .keychain
+        .get(&account_for(&h.vault_path))
+        .unwrap()
+        .unwrap();
+    let mut vault = Vault::open_with_credential(&h.vault_path, cred, None).unwrap();
+    let lock = VaultLock::acquire(&h.vault_path).unwrap();
+    vault
+        .insert_entry(
+            "repin-positive",
+            "repin-positive",
+            &Secret::new("s3cr3t-EXAMPLE".into()),
+            &policy,
+        )
+        .unwrap();
+    vault.save_atomic().unwrap();
+    drop(lock);
+
+    let report = cmd_check::check_at(&h.vault_path, &h.keychain, None, None).unwrap();
+    assert!(report.checks.iter().any(|check| {
+        check.level == kpexec::doctor::Level::Warn && check.message.contains("pin STALE")
+    }));
+
+    let mut args = RunArgs {
+        entry: "repin-positive".into(),
+        command: "exit-zero".into(),
+        dry_run: false,
+        timeout: None,
+        json: true,
+        trailing: Vec::new(),
+    };
+    let mut before_out = Vec::new();
+    let mut before_err = Vec::new();
+    let before = {
+        let mut emit = Emit::new(&mut before_out, &mut before_err);
+        cmd_run::run_with(
+            &args,
+            &h.vault_path,
+            &h.keychain,
+            None,
+            &RunOptions::default(),
+            &mut emit,
+        )
+        .unwrap()
+    };
+    assert_eq!(before, Outcome::Kpexec(KpexecStatus::ExeHashMismatch));
+
+    // The production dispatcher gates repin with LocalAuthentication; this
+    // isolated test exercises the post-authorization core after the separate
+    // dispatch test has established denial-before-I/O ordering.
+    cmd_entry::repin_with(
+        &EntryRepinArgs {
+            id: "repin-positive".into(),
+            command_name: Some("exit-zero".into()),
+        },
+        &h.vault_path,
+        &h.keychain,
+        None,
+    )
+    .unwrap();
+
+    let cred = h
+        .keychain
+        .get(&account_for(&h.vault_path))
+        .unwrap()
+        .unwrap();
+    let vault = Vault::open_with_credential(&h.vault_path, cred, None).unwrap();
+    let entry = vault.find_entry("repin-positive").unwrap().unwrap();
+    let command = &entry.policy.commands[0];
+    let current = pin::compute(shell.to_str().unwrap()).unwrap();
+    assert_eq!(command.exe_sha256.as_deref(), Some(current.sha256.as_str()));
+
+    args.json = false;
+    let mut after_out = Vec::new();
+    let mut after_err = Vec::new();
+    let after = {
+        let mut emit = Emit::new(&mut after_out, &mut after_err);
+        cmd_run::run_with(
+            &args,
+            &h.vault_path,
+            &h.keychain,
+            None,
+            &RunOptions::default(),
+            &mut emit,
+        )
+        .unwrap()
+    };
+    assert_eq!(after, Outcome::ChildExit(0));
+}
+
+#[test]
 fn repin_rejects_user_replaceable_executable() {
     let h = Harness::new();
     h.init();
@@ -591,6 +702,124 @@ fn stale_lock_is_reclaimed_on_write() {
         cmd_entry::rm_command_with(&rm, &h.vault_path, &h.keychain, h.config_hint()).unwrap_err();
     assert_eq!(err.status(), KpexecStatus::MalformedPolicy);
     assert!(err.message().contains("last command"));
+}
+
+#[cfg(unix)]
+#[test]
+fn crash_during_temp_write_leaves_original_vault_byte_intact() {
+    const CHILD_PATH_ENV: &str = "KPEXEC_A8_CRASH_CHILD_VAULT";
+    const CHILD_MASTER_ENV: &str = "KPEXEC_A8_CRASH_CHILD_MASTER";
+
+    if let (Some(path), Some(master)) = (
+        std::env::var_os(CHILD_PATH_ENV),
+        std::env::var_os(CHILD_MASTER_ENV),
+    ) {
+        use kpexec::policy::Policy;
+
+        let vault_path = PathBuf::from(path);
+        let master = Secret::new(master.to_string_lossy().into_owned());
+        let cred = VaultCredential {
+            password: master,
+            db_path: canonical_or_lexical(&vault_path)
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let mut vault = Vault::open_with_credential(&vault_path, cred, None).unwrap();
+
+        // Keep save() busy after it has created <vault>.tmp, giving the parent
+        // a deterministic pre-rename observation point. Xorshift bytes avoid
+        // turning this into a tiny, instantly compressed repeated string.
+        let mut state = 0x9e37_79b9_u32;
+        let mut bytes = Vec::with_capacity(8 * 1024 * 1024);
+        for _ in 0..bytes.capacity() {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            bytes.push(b'!' + (state % 90) as u8);
+        }
+        let description = String::from_utf8(bytes).unwrap();
+        let policy = Policy::new(description, "TOKEN".into(), None);
+        vault
+            .insert_entry(
+                "must-not-commit",
+                "must-not-commit",
+                &Secret::new("synthetic-child-secret".into()),
+                &policy,
+            )
+            .unwrap();
+
+        // The parent sends SIGSTOP as soon as the temp pathname appears and
+        // then SIGKILLs this process. Reaching the return is a test failure.
+        vault.save_atomic().unwrap();
+        panic!("crash-test child unexpectedly completed its atomic save");
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let vault_path = dir.path().join("crash-test.kdbx");
+    let master_text = "synthetic-a8-master-password";
+    let master = Secret::new(master_text.into());
+    let mut vault = Vault::create(vault_path.clone(), master.clone());
+    vault.save_atomic().unwrap();
+    let original = std::fs::read(&vault_path).unwrap();
+    let temp_path = PathBuf::from(format!("{}.tmp", vault_path.display()));
+    assert!(!temp_path.exists());
+
+    let mut child = ProcessCommand::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("crash_during_temp_write_leaves_original_vault_byte_intact")
+        .arg("--nocapture")
+        .env(CHILD_PATH_ENV, &vault_path)
+        .env(CHILD_MASTER_ENV, master_text)
+        .spawn()
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if std::fs::metadata(&temp_path).is_ok_and(|metadata| metadata.len() > 0) {
+            break;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("crash-test child exited before creating temp vault: {status}");
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("timed out waiting for crash-test child to begin atomic save");
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+
+    let pid = i32::try_from(child.id()).unwrap();
+    // SAFETY: pid is the live child created above and SIGSTOP/SIGKILL are valid
+    // signals. Stopping first freezes the exact observed pre-rename state.
+    let stop_rc = unsafe { libc::kill(pid, libc::SIGSTOP) };
+    std::thread::sleep(Duration::from_millis(20));
+    let frozen_destination = std::fs::read(&vault_path).unwrap();
+    // SAFETY: the child is stopped or still live, and SIGKILL is valid. Either
+    // outcome is reaped below before assertions can fail.
+    let kill_rc = unsafe { libc::kill(pid, libc::SIGKILL) };
+    let status = child.wait().unwrap();
+    assert_eq!(stop_rc, 0, "could not stop writer at the temp-file stage");
+    assert_eq!(kill_rc, 0, "could not kill stopped crash-test writer");
+    assert!(!status.success(), "SIGKILLed writer unexpectedly succeeded");
+    assert_eq!(
+        frozen_destination, original,
+        "the destination changed before the atomic rename"
+    );
+
+    assert_eq!(
+        std::fs::read(&vault_path).unwrap(),
+        original,
+        "a writer crash before rename changed the original vault bytes"
+    );
+    let cred = VaultCredential {
+        password: master,
+        db_path: canonical_or_lexical(&vault_path)
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let reopened = Vault::open_with_credential(&vault_path, cred, None).unwrap();
+    assert!(reopened.find_entry("must-not-commit").unwrap().is_none());
 }
 
 #[test]

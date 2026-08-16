@@ -322,6 +322,43 @@ fn a2_malformed_policy() {
     assert_eq!(r.ok().exit_code(), 102);
 }
 
+#[test]
+fn a2_duplicate_id_is_malformed_policy_json_without_spawn() {
+    let h = Harness::new();
+    let marker = h.dir.join("DUPLICATE-RAN");
+    let exe = h.script(
+        "duplicate-target.sh",
+        &format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+    );
+
+    // A hand-edited KeePass vault can contain duplicate kpexec.id values even
+    // though the authoring CLI refuses to create them. Resolution must reject
+    // the entire identity rather than selecting either entry.
+    for _ in 0..2 {
+        h.add_entry(
+            "duplicate",
+            "s3cr3t-EXAMPLE",
+            "TOKEN",
+            &exe,
+            &[],
+            false,
+            None,
+            None,
+        );
+    }
+
+    let mut args = h.run_args("duplicate", "cmd");
+    args.json = true;
+    let r = h.run(&args, &default_opts());
+
+    assert_eq!(r.json()["kpexec_status"], "malformed-policy");
+    assert_eq!(r.ok().exit_code(), 102);
+    assert!(
+        !marker.exists(),
+        "duplicate identity rejection must happen before subprocess execution"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // A3 — exact argv + env
 // ---------------------------------------------------------------------------

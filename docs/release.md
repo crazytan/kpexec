@@ -8,14 +8,24 @@ and notarization will not submit anything unless explicitly enabled.
 ## Prerequisites
 
 - A clean, reviewed commit whose Rust 1.96 and stable CI jobs passed.
-- An Apple silicon Mac running macOS 11 or newer. The initial MVP artifact is
-  intentionally `aarch64-apple-darwin` with a macOS 11.0 deployment target;
+- An Apple silicon Mac running macOS 15 or newer. The initial MVP artifact is
+  intentionally `aarch64-apple-darwin` with a macOS 15.0 deployment target;
   Intel and universal packages require later build-and-hardware validation.
 - Xcode Command Line Tools, Rust 1.96 or newer, and the locked dependencies.
 - For the credentialed stages, `Developer ID Application` and `Developer ID
   Installer` identities for Team ID `V82M9YX8BR` in the login Keychain.
-- A `notarytool` Keychain profile. Create it interactively once; do not put
-  Apple credentials in the repository or environment:
+- A `notarytool` Keychain profile. Create it once using an App Store Connect API
+  key or interactively using an Apple ID; do not put credentials in the
+  repository:
+
+  ```sh
+  xcrun notarytool store-credentials kpexec-notary \
+    --key "/secure/path/AuthKey_KEYID.p8" \
+    --key-id "<key-id>" \
+    --issuer "<issuer-id>"
+  ```
+
+  Alternatively, use an Apple ID:
 
   ```sh
   xcrun notarytool store-credentials kpexec-notary \
@@ -25,7 +35,8 @@ and notarization will not submit anything unless explicitly enabled.
 
   Omit `--password` so `notarytool` requests the app-specific password through
   its secure interactive prompt instead of placing it in shell history or the
-  process argument list.
+  process argument list. Validate either stored profile before release with
+  `xcrun notarytool history --keychain-profile kpexec-notary`.
 
 ## 1. Prepare without credentials
 
@@ -124,6 +135,15 @@ clean-machine checks:
 4. Confirm protected `main` requires the green CI checks, create the signed
    release tag, publish the `.pkg`, `SHA256SUMS`, license, and matching source
    archive, and verify the downloaded package again before announcing it.
+
+Record the results in [v0.1.0 release
+evidence](release-evidence-v0.1.0.md). A previously accepted package proves that
+the pipeline and credentials worked, but any change to code, build inputs,
+deployment target, or a document included in the package creates a new
+candidate. Only the hashes and notarization result for the exact tagged
+candidate are publishable evidence. Record those post-build values in the
+GitHub Release notes and uploaded `SHA256SUMS`, not in a tracked file that would
+change the source commit after the package was built.
 
 `kpexec doctor` verifies the installed executable's strict Developer ID
 signature, exact identifier and Team ID, and hardened runtime. Gatekeeper may
