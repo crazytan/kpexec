@@ -106,6 +106,7 @@ jobs:
         run: |
           set -euo pipefail
           scripts=(
+            scripts/release.sh
             spikes/keychain-acl/run-tests.sh
             spikes/local-auth/run-tests.sh
             spikes/signing/notarize.sh
@@ -114,8 +115,15 @@ jobs:
           bash -n "${scripts[@]}"
           shellcheck "${scripts[@]}"
 
-      - name: Type-check macOS spike probes
+      - name: Type-check macOS spike probes and verify production auth linkage
         if: matrix.rust == 'stable'
+        shell: bash
         run: |
+          set -euo pipefail
           /usr/bin/swiftc -typecheck -framework Security spikes/keychain-acl/kcprobe.swift
           /usr/bin/swiftc -typecheck -framework LocalAuthentication spikes/local-auth/laprobe.swift
+          cargo build --release --locked --bin kpexec --example user_presence_probe
+          otool -L target/release/examples/user_presence_probe | grep -F '/LocalAuthentication.framework/'
+          nm -gU target/release/examples/user_presence_probe | grep -F '_kpexec_authorize_user_presence'
+          otool -L target/release/kpexec | grep -F '/LocalAuthentication.framework/'
+          nm -gU target/release/kpexec | grep -F '_kpexec_authorize_user_presence'

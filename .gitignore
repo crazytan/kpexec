@@ -1,5 +1,9 @@
 # Rust build output
 /target
+/dist
 
 # Spike crates keep their own build output out of version control too.
 spikes/*/target
+
+# Supervised spike transcripts contain machine-local observations.
+spikes/*.local-results.txt

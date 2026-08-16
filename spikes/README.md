@@ -23,12 +23,16 @@ the keychain runner cleans its items up on exit (it only ever touches the servic
 | `local-auth/`   | item 3 | The Touch ID / account-password sheet can be raised from a signed, hardened-runtime CLI in a terminal, and **fails closed** over SSH / headless. |
 | `signing/`      | item 4 | The Developer ID + hardened-runtime + notarization pipeline, and that a differently-signed binary degrades the ACL (observed in `keychain-acl` T2) rather than silently working. |
 
-## Environment (fixed for these spikes)
+## Expected signing environment
 
-- macOS (Darwin 25.5), Apple Silicon, `swiftc` at `/usr/bin/swiftc`
+- macOS on Apple Silicon with `swiftc` at `/usr/bin/swiftc`
 - Signing identity: `Developer ID Application: Jia Tan (V82M9YX8BR)` (login keychain)
 - Identifier: `dev.crazytan.kpexec`  · Team ID: `V82M9YX8BR`
 - Isolated Keychain service: `dev.crazytan.kpexec.spike`
+
+The harnesses record the actual macOS version, build, architecture, tool versions,
+artifact hash, and signature at run time. Do not infer a result from the environment
+description alone.
 
 ## Run order
 
@@ -38,12 +42,20 @@ Run in this order; `signing/` builds on what the keychain leg observes.
 
 ```
 cd keychain-acl
+./run-tests.sh --preflight   # non-interactive; no Keychain data access or mutation
 ./run-tests.sh
 ```
 
-The script builds + signs `kcprobe`, then walks T1→T4, pausing before each prompting
-step. Answer/deny dialogs as instructed, and **record for each test whether a dialog
-appeared**. Cleanup runs automatically on exit.
+`--preflight` type-checks and ad-hoc-signs an isolated temporary build, confirms the
+Developer ID identity is installed, and performs attribute-only lookups for leftover
+spike items. It does not read Keychain item data or create, update, or delete an item.
+
+Run the supervised command once in a console-attached Terminal (not SSH). Stay at the
+screen, approve only the named Developer ID signing operations, and click **Deny** for
+T2 and T4 read dialogs. The script asks whether a dialog appeared after each read,
+combines that observation with exit codes and isolated ACL dumps, and writes a report
+to `keychain-acl/keychain-acl.local-results.txt` (gitignored). Cleanup runs
+automatically.
 
 - **T1** — signed binary create + read → expect silent success, **no dialog**.
 - **T2** — differently-signed copy reads the same item → expect a **dialog** (Deny it).
@@ -53,46 +65,88 @@ appeared**. Cleanup runs automatically on exit.
   → **must not** be silently readable. If it reads with no dialog and rc=0, the
   anti-substitution assumption is **BROKEN** — the script flags this loudly.
 
-**Partition-list note:** the script also dumps the item's attributes
-(`security dump-keychain -a`) after T1 and T4 so you can confirm whether a
-`teamid:V82M9YX8BR` partition is present on the creator-made item and absent on the
-planted item. See the header comment in `keychain-acl/run-tests.sh` for the working
-expectation and what a divergence would mean. **This is an open runtime question — see
-"Runtime uncertainties" below.**
+**Partition-list note:** the script isolates each item from `security dump-keychain -a`
+and machine-checks its `partition_id` entry. T1 must contain
+`teamid:V82M9YX8BR`; T4 must contain `apple-tool:` and must not contain the team
+partition. These checks are part of the verdict.
+
+#### Production-backend decision after the report
+
+- If all four tests pass, production may create a new item with `SecItemAdd`, inspect
+  its partition ACL before treating it as trusted, update only an already-verified
+  item, and inspect again before every data read. A duplicate item with an absent or
+  wrong partition must be rejected without reading or updating it.
+- If T1 lacks the team partition, silent API creation is insufficient. Keep the backend
+  fail-closed until setup has an explicit login-Keychain-password provisioning step;
+  LocalAuthentication approval alone does not provide that password to
+  `set-generic-password-partition-list`.
+- If T4 has the team partition or reads silently, the classic file-Keychain design does
+  not provide anti-substitution. Do not weaken the verdict; move to a provisioned data
+  protection Keychain access group/app-like bundle or redesign around a Secure Enclave
+  signing key.
+
+The minimum remaining supervised action is therefore exactly one command in
+Terminal.app:
+
+```
+cd /Users/tan/src/kpexec/spikes/keychain-acl
+./run-tests.sh
+```
+
+Approve the two named Developer ID signing requests if macOS asks, choose **Deny** for
+T2 and T4 reads, answer the script's dialog-observation questions, and attach
+`keychain-acl.local-results.txt`. If T4 creation itself asks, choose **Allow** (never
+Always Allow) so the worst-case planted item can still be tested.
 
 ### 2. `local-auth/` (LA interactive, then LA-over-SSH)
 
+First run the non-prompting prerequisite check. It type-checks the Swift reference,
+builds a release probe through kpexec's real Rust/Objective-C authorization path, checks
+framework/symbol linkage and the signing identity, and requires noninteractive localhost
+SSH to be ready:
+
 ```
 cd local-auth
-./run-tests.sh          # interactive leg — approve the Touch ID / password sheet
+./run-tests.sh --check-only
 ```
 
-Then the **SSH leg**, from a session **not** attached to the console GUI:
+If it reports that SSH is not ready, enable Remote Login and follow the printed commands
+to create/install a dedicated localhost test key. Pass its absolute path through
+`KPEXEC_LA_SSH_IDENTITY` until `--check-only` passes. Then, with the human watching the
+console for both legs, run one supervised session with the same environment variable:
 
 ```
-ssh localhost "$PWD/laprobe"; echo "ssh-leg rc=$?"
+KPEXEC_LA_SSH_IDENTITY="$HOME/.ssh/kpexec-localhost-test" \
+  ./run-tests.sh --supervised
 ```
 
-- Interactive → expect **PASS** (rc=0) after Touch ID / password; note if Touch ID was
-  requested vs a password sheet.
-- SSH → **must** be **UNAVAILABLE** (rc=2), **no sheet**. rc=0 (PASS) over SSH is a hard
-  fail (the write gate would be bypassable headless).
+The harness signs the production-path probe with the shared release signing script,
+machine-verifies its identifier, Team ID, hardened-runtime flag, timestamp, and hash,
+then runs both legs itself:
 
-`laprobe` exit codes: `0`=PASS, `1`=DENIED, `2`=UNAVAILABLE (fail-closed), `3`=error.
+- Interactive → require **AUTHORIZED** (rc=0) after Touch ID or account password and
+  record which sheet appeared.
+- SSH → require **UNAVAILABLE** (rc=2) and **no GUI sheet**. rc=0 is a hard failure.
+
+It exits nonzero on either mismatch and writes logs plus a results summary under
+`local-auth/build/` (gitignored). Exit codes are `0`=authorized, `1`=denied,
+`2`=unavailable/fail-closed, `3`=internal.
 
 ### 3. `signing/` (sign/verify, then notarize)
 
 ```
 cd signing
 ./sign.sh <binary> dev.crazytan.kpexec     # e.g. the kcprobe or a real kpexec build
-./notarize.sh <signed-artifact>            # requires one-time notarytool profile setup
+KPEXEC_SUBMIT=1 ./notarize.sh <signed-artifact>  # requires one-time profile setup
 ```
 
-`sign.sh` signs (Developer ID + hardened runtime + timestamp), runs
-`codesign --verify --strict`, and displays the signature — confirm `TeamIdentifier=V82M9YX8BR`,
-the identifier, and `flags=…(runtime)`. `notarize.sh` is a **skeleton**: it requires a
-one-time `xcrun notarytool store-credentials kpexec-notary …` (documented in its header)
-and does not fabricate credential handling.
+`sign.sh` signs (Developer ID + hardened runtime + timestamp), runs strict
+verification, and fails automatically unless the expected identifier, Team ID,
+runtime flag, and timestamp are present. `notarize.sh` remains a spike harness
+for arbitrary signed artifacts and requires a one-time Keychain profile. The
+production `.pkg` workflow, accidental-submission guards, stapling, payload
+inspection, Gatekeeper assessment, and checksums are in the
+[release runbook](../docs/release.md).
 
 ## What the human must observe at each prompt
 
@@ -119,30 +173,33 @@ Date run: __________   Operator: __________   macOS build: __________
 | T4 (planted item) | `kcprobe read` planted | | n/a | | dialog/deny, NOT silent | | |
 | — partition list T1 | `dump-keychain -a` | n/a | n/a | n/a | `teamid:V82M9YX8BR` present? | | record actual |
 | — partition list T4 | `dump-keychain -a` | n/a | n/a | n/a | no `teamid:` partition | | record actual |
-| LA interactive | `laprobe` (terminal) | n/a | | | rc0 (PASS) | | |
-| LA over SSH | `ssh localhost laprobe` | | n/a | | rc2 (UNAVAILABLE) | | |
+| LA interactive | production-path probe (terminal) | | | | rc0 (AUTHORIZED), sheet shown | | |
+| LA over SSH | production-path probe via BatchMode SSH | | n/a | | rc2 (UNAVAILABLE), no sheet | | |
 | sign/verify | `sign.sh … dev.crazytan.kpexec` | n/a | n/a | | rc0, TeamID+runtime | | |
 | notarize | `notarize.sh <artifact>` | n/a | n/a | | Accepted | | submission id: |
 
-## Runtime uncertainties (deliberately left for the supervised run)
+## Why T1–T4 are still supervised
 
-These are macOS-API behaviors the harnesses are designed to *reveal*, not assume. Treat
-each as an explicit observation point:
+Apple's open-source Security implementation supports the expected mechanism:
+partition validation runs in addition to the ordinary trusted-application ACL;
+Developer ID processes receive `teamid:<certificate OU>`, while `security(1)` receives
+`apple-tool:`; and a mismatched partition can be extended only through authorization.
+See Apple's [`acls.cpp`](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/acls.cpp)
+and [`clientid.cpp`](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/clientid.cpp).
+Source evidence does not establish current macOS UI behavior or the installed
+certificate's runtime behavior, so these remain explicit observations:
 
-1. **Partition list on API-created items.** Whether `SecItemAdd` from a team-signed,
-   hardened-runtime binary yields an item whose partition list already contains
-   `teamid:V82M9YX8BR` (so no `security set-generic-password-partition-list` is needed),
-   or whether an explicit partition-list set is required for silent re-reads. The T1
-   `dump-keychain -a` step is there to answer this. If a follow-up
-   `set-generic-password-partition-list` proves necessary, that becomes a step kpexec's
-   `init` must perform (and will itself trigger a login-password prompt at setup time).
+1. **Partition list at creation time.** T1 dumps the creator-made item before its first
+   read and requires `teamid:V82M9YX8BR`. T4 dumps the planted item before kpexec reads
+   it and requires `apple-tool:` with no team partition. If T1 lacks its partition,
+   production provisioning needs an authenticated setup step; if T4 already has the
+   team partition, the anti-substitution design fails.
 2. **T2 behavior for an ad-hoc-signed reader** — whether macOS shows a confirmation
    dialog (Allow/Deny) vs returns `errSecAuthFailed` outright. Either is a pass for the
    assumption (the point is: not silent); the exact mode is recorded, not assumed.
-3. **T4 planted-item readability** — the core anti-substitution check. Expectation: the
-   `-T kcprobe` trusted-app entry does **not** grant a silent read because it lacks a
-   `teamid:` partition, and adding one needs the login password. If T4 reads silently,
-   the design's anti-substitution claim in `security-design.md` must be revisited.
+3. **T4 planted-item readability** — the ordinary `-T kcprobe` trusted-app entry must
+   not override the separate `apple-tool:` partition check. A silent read is a design
+   failure.
 4. **LA over SSH exact LAError** — expected to be `notInteractive` or
    `biometryNotAvailable`, mapped to UNAVAILABLE (rc2). The specific code is printed and
    recorded; the requirement is only that it is **not** PASS.

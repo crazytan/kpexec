@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <LocalAuthentication/LocalAuthentication.h>
+#import <dispatch/dispatch.h>
 
 #include <stddef.h>
 #include <string.h>
@@ -11,16 +12,28 @@ enum {
     KPEXEC_AUTH_INTERNAL = 3,
 };
 
-static void copy_error(char *buffer, size_t capacity, NSError *error) {
+static void copy_message(char *buffer, size_t capacity, NSString *message) {
     if (buffer == NULL || capacity == 0) {
         return;
     }
-    NSString *description = error.localizedDescription ?: @"unknown LocalAuthentication error";
-    const char *utf8 = description.UTF8String;
+    const char *utf8 = message.UTF8String;
     if (utf8 == NULL) {
         utf8 = "unknown LocalAuthentication error";
     }
     strlcpy(buffer, utf8, capacity);
+}
+
+static void copy_error(char *buffer, size_t capacity, NSError *error) {
+    if (error == nil) {
+        copy_message(buffer, capacity, @"unknown LocalAuthentication error");
+        return;
+    }
+    NSString *message = [NSString
+        stringWithFormat:@"%@ code=%ld: %@",
+                         error.domain ?: @"unknown-domain",
+                         (long)error.code,
+                         error.localizedDescription ?: @"no description"];
+    copy_message(buffer, capacity, message);
 }
 
 static BOOL is_unavailable_error(NSError *error) {
@@ -71,7 +84,17 @@ int kpexec_authorize_user_presence(const char *reason_utf8,
             evaluation_error = error;
             dispatch_semaphore_signal(semaphore);
         }];
-        dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+        // A framework callback must not be able to hang a CLI mutation forever.
+        // Invalidation is fail-closed; a late callback retains its captured
+        // state under ARC and is safe after this function returns.
+        dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_SEC);
+        if (dispatch_semaphore_wait(semaphore, deadline) != 0) {
+            [context invalidate];
+            copy_message(error_buffer,
+                         error_capacity,
+                         @"LocalAuthentication timeout after 120 seconds");
+            return KPEXEC_AUTH_UNAVAILABLE;
+        }
 
         if (authorized) {
             return KPEXEC_AUTHORIZED;

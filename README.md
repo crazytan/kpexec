@@ -99,6 +99,7 @@ the policy's fixed argument prefix; kpexec does not invoke a shell. Run
 - [CLI design](docs/cli-design.md) — data model, KDBX mapping, subcommands, agent contract
 - [Milestones](docs/milestones.md) — de-risking spikes, implementation milestones, acceptance tests
 - [MVP ship checklist](docs/mvp-ship-checklist.md) — remaining platform work, release build, and final acceptance pass
+- [Release runbook](docs/release.md) — staged build, signing, packaging, notarization, and verification
 
 ## License
 
