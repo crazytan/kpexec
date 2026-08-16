@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# notarize.sh — SKELETON for the milestone-zero item-4 notarization leg.
+# notarize.sh — supervised milestone-zero item-4 notarization harness.
 #
 # ============================ ONE-TIME SETUP (the user must do this) ============================
 # Notarization needs Apple-issued credentials stored under a named keychain profile. This is a
@@ -18,8 +18,9 @@
 #   * Alternatively, App Store Connect API keys (--key / --key-id / --issuer) can back the
 #     profile; either way the result is a named profile this script consumes.
 #
-# This SKELETON deliberately does NOT fabricate any credential handling beyond referencing the
-# profile name. Do not add Apple IDs, passwords, or API keys into this file or the repo.
+# This harness deliberately does NOT fabricate any credential handling beyond referencing the
+# profile name. Do not add Apple IDs, passwords, or API keys into this file or the repo. The
+# production package workflow lives in ../../scripts/release.sh and ../../docs/release.md.
 # ================================================================================================
 #
 # Usage: ./notarize.sh <signed-artifact>
@@ -29,16 +30,21 @@
 # notarytool submits a .zip (or .dmg/.pkg). A bare Mach-O binary must be zipped first. Stapling
 # a ticket to a bare binary is not supported — for a CLI, the notarization ticket is validated
 # online by Gatekeeper; distribute inside a stapled .dmg/.pkg/.zip container as needed. This
-# skeleton shows the submit + (attempted) staple flow; wire it into the real release packaging
-# when kpexec ships.
+# harness shows the submit + (attempted) staple behavior for the security spike. Use the release
+# workflow for a stapleable, fully verified distribution package.
 
 set -euo pipefail
 
-PROFILE="kpexec-notary"
+PROFILE="${KPEXEC_NOTARY_PROFILE:-kpexec-notary}"
 
 if [[ $# -ne 1 ]]; then
     echo "usage: $0 <signed-artifact>" >&2
     exit 10
+fi
+
+if [[ "${KPEXEC_SUBMIT:-0}" != "1" ]]; then
+    echo "FAIL: submission is disabled; review the artifact, then rerun with KPEXEC_SUBMIT=1" >&2
+    exit 13
 fi
 
 ARTIFACT="$1"

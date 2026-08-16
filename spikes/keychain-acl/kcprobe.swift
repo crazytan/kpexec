@@ -30,6 +30,15 @@
 import Foundation
 import Security
 
+// T3 compiles with `-D KC_PROBE_V2`. Referencing the generation in observable
+// output guarantees that its Mach-O bytes differ from T1; merely touching the
+// source is not sufficient for a deterministic compiler.
+#if KC_PROBE_V2
+let buildGeneration = "v2"
+#else
+let buildGeneration = "v1"
+#endif
+
 // Turn an OSStatus into a human-readable line. SecCopyErrorMessageString gives the
 // localized text; we also print the raw code so the observer can cross-reference.
 func describe(_ status: OSStatus) -> String {
@@ -66,7 +75,7 @@ func cmdCreate(service: String, account: String, value: String) -> Never {
     let status = SecItemAdd(query as CFDictionary, nil)
     switch status {
     case errSecSuccess:
-        print("CREATE ok: service=\(service) account=\(account)")
+        print("CREATE ok: generation=\(buildGeneration) service=\(service) account=\(account)")
         exit(0)
     case errSecDuplicateItem:
         print("CREATE duplicate: item already exists (service=\(service) account=\(account))")
@@ -91,7 +100,7 @@ func cmdRead(service: String, account: String) -> Never {
     switch status {
     case errSecSuccess:
         if let data = out as? Data, let s = String(data: data, encoding: .utf8) {
-            print("READ ok: value=\(s)")
+            print("READ ok: generation=\(buildGeneration) value=\(s)")
         } else if let data = out as? Data {
             print("READ ok: value=<\(data.count) non-UTF8 bytes>")
         } else {

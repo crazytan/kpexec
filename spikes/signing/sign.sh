@@ -11,7 +11,8 @@
 
 set -euo pipefail
 
-IDENTITY="Developer ID Application: Jia Tan (V82M9YX8BR)"
+IDENTITY="${KPEXEC_SIGNING_IDENTITY:-Developer ID Application: Jia Tan (V82M9YX8BR)}"
+TEAM_ID="${KPEXEC_TEAM_ID:-V82M9YX8BR}"
 
 if [[ $# -ne 2 ]]; then
     echo "usage: $0 <binary> <identifier>" >&2
@@ -49,15 +50,31 @@ run codesign --verify --strict --deep --verbose=2 "$BINARY"
 
 echo
 echo "== signature details (Team ID, identifier, hardened-runtime flags) =="
-run codesign --display --verbose=4 "$BINARY"
+signature="$(codesign --display --verbose=4 "$BINARY" 2>&1)"
+printf '%s\n' "$signature"
+
+grep -Fq "Identifier=$IDENTIFIER" <<<"$signature" || {
+    echo "FAIL: signed identifier does not equal '$IDENTIFIER'" >&2
+    exit 12
+}
+grep -Fq "TeamIdentifier=$TEAM_ID" <<<"$signature" || {
+    echo "FAIL: TeamIdentifier does not equal '$TEAM_ID'" >&2
+    exit 13
+}
+grep -Eq '^flags=.*\(runtime\)' <<<"$signature" || {
+    echo "FAIL: hardened-runtime flag is absent" >&2
+    exit 14
+}
+grep -Eq '^Timestamp=' <<<"$signature" || {
+    echo "FAIL: secure signing timestamp is absent" >&2
+    exit 15
+}
 
 echo
 echo "== designated requirement (what the Keychain ACL should anchor to) =="
 run codesign --display --requirements - "$BINARY" || true
 
 echo
-echo "OK: signed and verified. For a release artifact, next run ./notarize.sh."
-echo ">>> HUMAN: confirm the display output shows"
-echo ">>>   - 'TeamIdentifier=V82M9YX8BR'"
-echo ">>>   - the identifier you passed ('$IDENTIFIER')"
-echo ">>>   - 'flags=0x10000(runtime)' (hardened runtime present)"
+echo "sha256=$(/usr/bin/shasum -a 256 "$BINARY" | awk '{print $1}')"
+echo "OK: identifier, Team ID, hardened runtime, timestamp, and strict signature verified."
+echo "For a release artifact, next run ./notarize.sh."
