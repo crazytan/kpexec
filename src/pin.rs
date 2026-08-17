@@ -1,9 +1,9 @@
 //! Executable pinning: canonicalization + SHA-256 of the target bytes.
 //!
-//! Per security-design invariants 4 and 5, a policy executable must be an
+//! Per the pinning boundary in `docs/security.md`, a policy executable must be an
 //! absolute path that canonicalizes (symlinks resolved) to an existing regular
 //! file; the policy stores the SHA-256 of that canonical file's *bytes*
-//! (`exe_sha256`), computed at authoring time. `run` (M4) re-hashes immediately
+//! (`exe_sha256`), computed at authoring time. `run` re-hashes immediately
 //! before exec and rejects on mismatch; `entry repin` recomputes after a
 //! legitimate upgrade.
 //!

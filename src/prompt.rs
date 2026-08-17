@@ -23,7 +23,7 @@ use crate::status::KpexecStatus;
 /// * otherwise a hidden `rpassword` prompt is shown.
 ///
 /// The `< 8 chars` refusal is enforced here so every secret entry point shares
-/// it (cli-design: "Secrets shorter than 8 characters are refused").
+/// it (shorter secrets cannot be redacted reliably).
 pub fn read_secret(prompt: &str, from_stdin: bool) -> Result<Secret> {
     let raw = if from_stdin {
         let mut line = String::new();
@@ -42,7 +42,7 @@ pub fn read_secret(prompt: &str, from_stdin: bool) -> Result<Secret> {
     validate_secret(raw)
 }
 
-/// The minimum secret length (cli-design: shorter secrets redact unreliably).
+/// The minimum secret length; shorter values cannot be redacted reliably.
 pub const MIN_SECRET_LEN: usize = 8;
 
 /// Wrap a raw plaintext secret, enforcing the `< 8 chars` refusal. Split out
@@ -88,7 +88,7 @@ pub fn read_line(prompt: &str, flag: Option<String>) -> Result<String> {
 
 /// Parse an argument prefix with shell-word rules (quoting supported). Warns via
 /// the returned [`PrefixWarning`] when the prefix is empty or a single word,
-/// since short prefixes grant a broad surface (cli-design).
+/// since short prefixes grant a broad surface.
 pub fn parse_prefix(input: &str) -> Result<(Vec<String>, Option<PrefixWarning>)> {
     let words = shell_words::split(input).map_err(|e| {
         KpexecError::new(

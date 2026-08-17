@@ -9,8 +9,8 @@ use crate::status::KpexecStatus;
 
 /// A kpexec error: a status plus a message.
 ///
-/// Construct via the helpers ([`KpexecError::not_implemented`],
-/// [`KpexecError::config`], etc.) so the status is always paired with an
+/// Construct via [`KpexecError::new`] or a status-specific helper such as
+/// [`KpexecError::config`] so the status is always paired with an
 /// appropriate message. The `Display` impl is the message alone; the status is
 /// carried separately and drives the exit code.
 #[derive(Debug, thiserror::Error)]
@@ -39,18 +39,6 @@ impl KpexecError {
         &self.message
     }
 
-    /// A stub for a command that belongs to a future milestone.
-    ///
-    /// `milestone` is the milestone number that will implement it (e.g. `2`).
-    /// Routed through the structured error path so callers get a clean status,
-    /// never a `todo!()`/`panic!`.
-    pub fn not_implemented(feature: &str, milestone: u8) -> Self {
-        KpexecError::new(
-            KpexecStatus::NotImplemented,
-            format!("{feature} is not implemented yet (milestone {milestone})"),
-        )
-    }
-
     /// A config-error: the untrusted config hint was unparseable or inconsistent.
     pub fn config(message: impl Into<String>) -> Self {
         KpexecError::new(KpexecStatus::ConfigError, message)
@@ -68,14 +56,6 @@ pub type Result<T> = std::result::Result<T, KpexecError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn not_implemented_carries_status_and_milestone() {
-        let e = KpexecError::not_implemented("entry add", 2);
-        assert_eq!(e.status(), KpexecStatus::NotImplemented);
-        assert!(e.message().contains("milestone 2"));
-        assert!(e.message().contains("entry add"));
-    }
 
     #[test]
     fn config_error_status() {

@@ -128,17 +128,17 @@ clean-machine checks:
 1. Install the package on a clean macOS account with
    `sudo installer -pkg <package> -target /`, then run `kpexec doctor`.
 2. Complete and record the Keychain ACL, LocalAuthentication, signer,
-   substitution, and same-identity-upgrade tests in
-   [`spikes/README.md`](../spikes/README.md).
+   substitution, and same-identity-upgrade tests described in
+   [`testing.md`](testing.md) using `tests/platform/`.
 3. Run A1–A16 and the disposable, minimally scoped `gh` token demonstration;
    confirm the token is absent from output, JSON, logs, and temporary artifacts.
 4. Confirm protected `main` requires the green CI checks, create the signed
    release tag, publish the `.pkg`, `SHA256SUMS`, license, and matching source
    archive, and verify the downloaded package again before announcing it.
 
-Record the results in [v0.1.0 release
-evidence](release-evidence-v0.1.0.md). A previously accepted package proves that
-the pipeline and credentials worked, but any change to code, build inputs,
+Record final artifact facts and sanitized reports in the GitHub Release. A
+previously accepted package proves that the pipeline and credentials worked,
+but any change to code, build inputs,
 deployment target, or a document included in the package creates a new
 candidate. Only the hashes and notarization result for the exact tagged
 candidate are publishable evidence. Record those post-build values in the

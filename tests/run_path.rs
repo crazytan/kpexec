@@ -6,9 +6,9 @@
 //! Output is captured via in-memory [`kpexec::cmd_run::Emit`] sinks, so the
 //! tests are deterministic and safe to run in parallel (no FD games).
 //!
-//! Coverage map (docs/milestones.md acceptance tests + M4 spec points):
+//! Coverage map (see `docs/testing.md`):
 //! * A1 — `--dry-run`: argv printed, no spawn (a marker-file target proves it),
-//!   and the secret is structurally never read.
+//!   and the selected credential is never explicitly extracted.
 //! * A2 — unknown entry / unknown command / malformed policy statuses (`--json`).
 //! * A3 — exact argv + env: the child dumps its argv and env to a file; we assert
 //!   env is EXACTLY baseline + env.set + secret and argv is verbatim (spaces,
@@ -199,7 +199,7 @@ fn default_opts() -> RunOptions {
 }
 
 // ---------------------------------------------------------------------------
-// A1 — dry-run: argv printed, no spawn, no secret read
+// A1 — dry-run: argv printed, no spawn, no selected credential extraction
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -7,7 +7,7 @@
 //!   SHA-256 of the *canonical* vault path (see [`account_for`]),
 //! * value: a JSON document `{"password": "...", "db_path": "..."}` — the
 //!   vault's identity lives *inside* the ACL-protected item; `config.toml` is a
-//!   hint that must agree (security-design "Vault identity binding").
+//!   hint that must agree (see `docs/security.md`).
 //!
 //! Access is behind the [`KeychainStore`] trait so tests can drive a
 //! file-backed fake and NEVER touch the real login keychain. The real macOS
@@ -33,14 +33,14 @@ pub const SERVICE: &str = "dev.crazytan.kpexec";
 pub(crate) const EXPECTED_IDENTIFIER: &str = SERVICE;
 pub(crate) const EXPECTED_TEAM_ID: &str = "V82M9YX8BR";
 
-/// Isolated trust domain used only by the supervised backend probe.
-#[cfg(feature = "supervised-probes")]
+/// Isolated trust domain used only by the supervised platform test.
+#[cfg(feature = "platform-tests")]
 pub const DEVELOPMENT_PROBE_SERVICE: &str = "dev.crazytan.kpexec.backend-spike";
-/// The code-signing identifier accepted by the supervised backend probe.
-#[cfg(feature = "supervised-probes")]
+/// Code-signing identifier accepted by the supervised platform test.
+#[cfg(feature = "platform-tests")]
 pub const DEVELOPMENT_PROBE_IDENTIFIER: &str = DEVELOPMENT_PROBE_SERVICE;
-/// The only account namespace accepted by the supervised backend probe.
-#[cfg(feature = "supervised-probes")]
+/// Account namespace accepted by the supervised platform test.
+#[cfg(feature = "platform-tests")]
 pub const DEVELOPMENT_PROBE_ACCOUNT_PREFIX: &str = "backend-spike:";
 
 /// The canonicalized-path fingerprint used in the account name.
@@ -162,8 +162,7 @@ fn decode(value: &str) -> Result<VaultCredential> {
 ///
 /// Items live as `<dir>/<service>__<account>.json`; the value is the same JSON
 /// the real store writes. This lets integration tests drive the full lifecycle
-/// against temp dirs without touching the login keychain (a hard requirement of
-/// the milestone).
+/// against temp dirs without touching the login keychain.
 pub struct FileKeychain {
     dir: std::path::PathBuf,
 }
@@ -256,7 +255,7 @@ pub mod macos {
         AclBinding, EXPECTED_IDENTIFIER, EXPECTED_TEAM_ID, KeychainStore, SERVICE, VaultCredential,
         decode, encode,
     };
-    #[cfg(feature = "supervised-probes")]
+    #[cfg(feature = "platform-tests")]
     use super::{
         DEVELOPMENT_PROBE_ACCOUNT_PREFIX, DEVELOPMENT_PROBE_IDENTIFIER, DEVELOPMENT_PROBE_SERVICE,
     };
@@ -321,20 +320,19 @@ pub mod macos {
         const LABEL: &'static str = "release";
     }
 
-    #[cfg(feature = "supervised-probes")]
+    #[cfg(feature = "platform-tests")]
     struct DevelopmentProbeProfile;
 
-    #[cfg(feature = "supervised-probes")]
+    #[cfg(feature = "platform-tests")]
     impl BackendProfile for DevelopmentProbeProfile {
         const SERVICE: &'static str = DEVELOPMENT_PROBE_SERVICE;
         const IDENTIFIER: &'static str = DEVELOPMENT_PROBE_IDENTIFIER;
         const TEAM_ID: &'static str = EXPECTED_TEAM_ID;
-        // An Apple Development leaf carries both of these critical extension
-        // OIDs. Requiring both prevents this profile from accepting Developer
-        // ID Application or Apple Distribution certificates.
+        // Apple Development certificates carry both critical extension OIDs.
+        // Requiring both excludes Developer ID and distribution certificates.
         const CERTIFICATE_REQUIREMENT: &'static str = "certificate leaf[field.1.2.840.113635.100.6.1.2] exists and certificate leaf[field.1.2.840.113635.100.6.1.12] exists";
         const ACCOUNT_PREFIX: Option<&'static str> = Some(DEVELOPMENT_PROBE_ACCOUNT_PREFIX);
-        const LABEL: &'static str = "supervised development probe";
+        const LABEL: &'static str = "supervised platform test";
     }
 
     fn requirement_text<P: BackendProfile>() -> String {
@@ -782,15 +780,14 @@ pub mod macos {
         }
     }
 
-    /// Apple-Development-signed backend used only by the supervised T5 probe.
+    /// Apple-Development backend used only by the supervised platform test.
     ///
-    /// This type is absent from default/release builds. Its identity,
-    /// identifier, service, and account namespace are compile-time constants;
-    /// there is no runtime switch into the production trust domain.
-    #[cfg(feature = "supervised-probes")]
+    /// Its identifier, service, certificate class, and account namespace are
+    /// compile-time constants distinct from the production trust domain.
+    #[cfg(feature = "platform-tests")]
     pub struct DevelopmentProbeKeychain;
 
-    #[cfg(feature = "supervised-probes")]
+    #[cfg(feature = "platform-tests")]
     impl KeychainStore for DevelopmentProbeKeychain {
         fn acl_binding(&self, account: &str) -> Result<AclBinding> {
             acl_binding::<DevelopmentProbeProfile>(account)
@@ -892,7 +889,7 @@ pub mod macos {
             SecRequirement::from_str(&requirement).expect("built-in requirement must parse");
         }
 
-        #[cfg(feature = "supervised-probes")]
+        #[cfg(feature = "platform-tests")]
         #[test]
         fn development_probe_cannot_enter_production_trust_domain() {
             let release = requirement_text::<ReleaseProfile>();
@@ -913,7 +910,7 @@ pub mod macos {
                 .expect("built-in development requirement must parse");
         }
 
-        #[cfg(feature = "supervised-probes")]
+        #[cfg(feature = "platform-tests")]
         #[test]
         fn development_probe_refuses_production_accounts() {
             validate_account::<DevelopmentProbeProfile>("backend-spike:isolated").unwrap();

@@ -1,4 +1,4 @@
-// kcprobe.swift — milestone-zero spike for kpexec item 2 (Keychain ACL behavior)
+// Synthetic Keychain ACL probe used by the supervised platform test.
 //
 // Purpose: exercise Keychain generic-password items so a human observer can confirm
 // the Team ID + identifier partition list lets the signed binary read silently while
@@ -8,10 +8,10 @@
 // framework popped a GUI confirmation dialog. SecItemCopyMatching blocks until the
 // human answers, then returns success/failure. So the *machine* verdict here is only
 // "read returned data" vs "read failed with <status>". Whether a DIALOG APPEARED is a
-// HUMAN observation — run-tests.sh pauses and tells the observer exactly what to watch.
+// HUMAN observation — run-acl-matrix.sh pauses and tells the observer what to watch.
 //
 // Build:  swiftc -framework Security -o kcprobe kcprobe.swift
-// Sign:   see run-tests.sh (Apple Development, isolated .spike identifier)
+// Sign:   see run-acl-matrix.sh (Apple Development, isolated identifier)
 //
 // Subcommands:
 //   create <service> <account> <value>   SecItemAdd a generic password

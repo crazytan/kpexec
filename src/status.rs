@@ -1,8 +1,8 @@
 //! Result status codes and the `--json` envelope.
 //!
 //! This module is the single source of truth for how kpexec-level outcomes map
-//! to process exit codes. Later milestones (M4 run path, M5 output handling)
-//! build their result reporting on the types defined here, so the mapping is
+//! to process exit codes. The run path and output layer build their result
+//! reporting on the types defined here, so the mapping is
 //! kept deliberately small and stable.
 //!
 //! # Exit-code contract
@@ -47,7 +47,7 @@ pub enum KpexecStatus {
     /// `config.toml` was present but could not be parsed, or is internally
     /// inconsistent. Config is an untrusted hint, so this never carries secrets.
     ConfigError,
-    /// A feature that is not part of the current milestone was invoked.
+    /// A recognized feature is not implemented by this build.
     NotImplemented,
     /// The user explicitly denied or cancelled a mutation authorization.
     UserPresenceDenied,

@@ -12,7 +12,7 @@
 //! never reached it. The global subscriber can only be set once per process, so
 //! it lives in its own binary and is initialised once here.
 //!
-//! Coverage (docs/milestones.md):
+//! Coverage (see `docs/testing.md`):
 //! * A4 — the raw secret appears NOWHERE: not in stdout, stderr, the `--json`
 //!   envelope, nor the audit log file (both streams echoed, then grepped).
 //! * A5 — URL-encoded (upper + lower hex) and JSON-escaped forms are all masked.

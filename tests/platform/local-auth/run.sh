@@ -2,11 +2,11 @@
 # Validate LocalAuthentication through the hardened kpexec implementation.
 #
 # Safe mode (never executes LocalAuthentication or uses the signing private key):
-#   ./run-tests.sh --check-only
+#   ./run.sh --check-only
 #
 # Prompt-bearing supervised mode (Apple-Development-signs an isolated probe, then
 # runs GUI + SSH legs in one session):
-#   ./run-tests.sh --supervised
+#   ./run.sh --supervised
 #
 # Production probe exit codes: 0=authorized, 1=denied, 2=unavailable, 3=internal.
 
@@ -19,8 +19,7 @@ readonly DEVELOPMENT_REQUIREMENT="identifier \"$IDENTIFIER\" and anchor apple ge
 readonly PRODUCTION_REQUIREMENT="identifier \"dev.crazytan.kpexec\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$HERE/../.." && pwd)"
-SRC="$HERE/laprobe.swift"
+REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 BUILD_DIR="${KPEXEC_LA_BUILD_DIR:-$HERE/build}"
 BIN="${KPEXEC_LA_PROBE:-$REPO_ROOT/target/release/examples/user_presence_probe}"
 RELEASE_BIN="$REPO_ROOT/target/release/kpexec"
@@ -97,7 +96,7 @@ Before the supervised session:
        ssh-copy-id -i "$HOME/.ssh/kpexec-localhost-test.pub" localhost
   3. Re-run this harness with its absolute path:
        KPEXEC_LA_SSH_IDENTITY="$HOME/.ssh/kpexec-localhost-test" \
-         ./run-tests.sh --check-only
+         ./run.sh --check-only
 
 The supervised harness deliberately uses BatchMode and no pseudo-terminal so an SSH
 password or host-key question cannot be confused with LocalAuthentication behavior.
@@ -115,7 +114,6 @@ safe_checks() {
     echo "ssh key:     ${SSH_IDENTITY:-default SSH selection}"
     echo
 
-    require_tool /usr/bin/swiftc
     require_tool /usr/bin/codesign
     require_tool /usr/bin/security
     require_tool /usr/bin/ssh
@@ -130,7 +128,6 @@ safe_checks() {
     echo "== OS and toolchain =="
     run /usr/bin/sw_vers
     run /usr/bin/uname -mprsv
-    run /usr/bin/swiftc --version
 
     echo
     echo "== console GUI session =="
@@ -145,11 +142,6 @@ safe_checks() {
         return 1
     fi
     echo "PASS: current user owns the console and has an Aqua launchd session."
-
-    echo
-    echo "== Swift reference type-check (no LocalAuthentication execution) =="
-    run /usr/bin/swiftc -typecheck \
-        -framework LocalAuthentication -framework Security "$SRC"
 
     echo
     echo "== production Rust/Objective-C probe build + linkage =="

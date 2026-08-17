@@ -1,6 +1,6 @@
 //! Supervised LocalAuthentication probe using kpexec's production Rust/Objective-C path.
 //!
-//! This binary is built and signed by `spikes/local-auth/run-tests.sh`. Never
+//! This binary is built and signed by `tests/platform/local-auth/run.sh`. Never
 //! run it from automated tests: it intentionally presents system authentication
 //! UI when attached to an interactive macOS session.
 

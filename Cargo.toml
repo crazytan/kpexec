@@ -10,13 +10,18 @@ publish = false
 
 [features]
 default = []
-# Builds only the isolated Apple-Development-signed macOS backend probe. The
-# normal kpexec binary never selects this profile, even when the feature is on.
-supervised-probes = []
+# Builds the isolated Apple-Development Keychain backend used only by the
+# supervised platform test. The production binary always selects ReleaseProfile.
+platform-tests = []
 
 [[example]]
 name = "keychain_backend_probe"
-required-features = ["supervised-probes"]
+path = "tests/platform/keychain/backend_probe.rs"
+required-features = ["platform-tests"]
+
+[[example]]
+name = "user_presence_probe"
+path = "tests/platform/local-auth/user_presence_probe.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

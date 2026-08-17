@@ -1,7 +1,7 @@
 //! Supervised, synthetic-data probe for the macOS Keychain implementation.
 //!
-//! This example is invoked only by `spikes/keychain-acl/run-backend-test.sh`.
-//! Cargo refuses to build it without the `supervised-probes` feature. That
+//! This example is invoked only by `tests/platform/keychain/run-backend.sh`.
+//! Cargo refuses to build it without the `platform-tests` feature. That
 //! feature exposes an Apple-Development-only profile with an isolated service
 //! and account namespace; it cannot select the production profile at runtime.
 
