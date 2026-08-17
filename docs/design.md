@@ -13,12 +13,15 @@ injects the credential into that child. The agent does not need the credential
 value or the executable path.
 
 This is useful only with an honest boundary statement: an unrestricted process
-running as the same macOS user may attach a debugger or obtain a task port for
-an attachable credential-bearing child and inspect its environment or memory.
-It may also signal or influence the child. kpexec is designed for agents constrained by an
-OS/application sandbox or tool permission boundary. It reduces credential
-distribution and accidental disclosure; it is not a same-user process sandbox.
-See [Security and threat model](security.md) before adopting it.
+running as the same macOS user can inspect a non-`CS_RESTRICT` child's initial
+environment through `KERN_PROCARGS2` (including `ps -E`/`ps eww`) without a
+debugger. Hardened runtime does not hide that environment, although it separately
+limits some debugger/task-port access to memory. The process may also signal or
+otherwise influence the child. kpexec is designed for agents constrained by an
+OS/application sandbox or tool permission boundary verified to block these
+paths. It reduces credential distribution and accidental disclosure; it is not
+a same-user process sandbox. See [Security and threat model](security.md) before
+adopting it.
 
 ## Design goals
 

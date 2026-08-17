@@ -10,8 +10,9 @@ The expected adversary is prompt injection or malicious project content that
 controls an agent's decisions. The agent can request kpexec operations and may
 write ordinary files owned by the user, including the config file and vault
 path. The intended deployment gives the agent a constrained command/tool
-surface that does not include arbitrary same-UID process inspection, debugging,
-or unrestricted signaling.
+surface that does not include same-UID process-environment inspection (such as
+`KERN_PROCARGS2` or `ps -E`/`ps eww`), debugging/task-port access, or
+unrestricted signaling.
 
 Trusted components are macOS Keychain and Security frameworks, the OS code-
 signing and process model, the Developer ID–signed kpexec release, the KDBX
@@ -47,6 +48,8 @@ integrity, the identity of the vault, and the accuracy of execution results.
   only in the approved child's environment. It does not put it in argv, stdin,
   config, kpexec logs, or normal kpexec output. A dry run opens and parses the
   vault, but does not extract or inject the selected credential or spawn a child.
+  This placement is not a confidentiality boundary against unrestricted
+  same-UID process inspection, as described below.
 - **Bounded, redacted output.** Output is retained within policy limits and is
   checked for common representations of the credential before emission. A
   detected redaction failure suppresses output.
@@ -63,15 +66,29 @@ to the approved child or the local account.
 
 ### No same-UID process confidentiality
 
-An unrestricted agent running as the same macOS user may be able to attach a
-debugger or obtain a task port for an attachable child, inspect its environment
-or memory, send signals, or otherwise influence it. This was reproduced with a
-synthetic credential and an ad-hoc-signed CLI; hardened Apple binaries denied
-the same debugger attachment. Once the child starts, kpexec cannot make its
-credential secret from an adversary with those capabilities.
-Use an OS/application sandbox or tool permission boundary that denies those
-capabilities. If the agent has an unrestricted shell as your login user, do not
-treat kpexec as a credential-confidentiality boundary.
+An unrestricted agent running as the same macOS user can query a
+non-`CS_RESTRICT` process's initial environment through `KERN_PROCARGS2`;
+`ps -E` and `ps eww` expose the same class of data. This does not require a
+debugger, task port, or authorization prompt. Because kpexec puts the credential
+in the approved child's initial environment, an observer may recover it while
+those bytes remain available. Calling `unsetenv` in the child does not by itself
+erase the original environment bytes.
+
+Hardened runtime is a separate defense: it can deny debugger/task-port access to
+process memory, but does not hide the initial environment from these queries.
+Apple platform binaries and synthetic targets carrying `CS_RESTRICT` omitted
+their environment in observed queries. That is observed OS behavior, not a
+kpexec-supported contract: kpexec neither requires nor verifies the property,
+and each descendant is evaluated independently. It is therefore not the kpexec
+confidentiality boundary.
+
+Use an OS/application sandbox or tool permission boundary empirically verified
+to deny both process-environment inspection and debugger/task-port access; do
+not infer coverage from a sandbox rule's name alone. If the agent has an
+unrestricted shell as your login user, do not treat kpexec as a
+credential-confidentiality boundary. Debug kernels, disabled platform
+protections, privileged entitlements, or OS changes may broaden visibility
+further.
 
 ### The approved child receives the credential
 
@@ -121,7 +138,8 @@ a compromised login session.
 ## Adoption checklist
 
 - Give the agent only the process and filesystem capabilities it actually
-  needs; specifically deny process-environment inspection and debugging.
+  needs; specifically verify that it cannot use `KERN_PROCARGS2`, `ps -E`/`ps
+  eww`, debugger/task-port access, or equivalent process-inspection paths.
 - Use minimally scoped, short-lived service credentials where possible.
 - Target an admin-owned, non-writable, self-contained executable and keep
   pinning enabled.

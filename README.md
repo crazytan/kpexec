@@ -24,12 +24,14 @@ The first release is available now:
 
 > [!IMPORTANT]
 > kpexec is **not** a security boundary against an agent with an unrestricted
-> same-user shell. On macOS, such an agent may attach a debugger or obtain a
-> task port for an attachable credential-bearing child and read its environment
-> or memory. Use kpexec with an agent sandbox or permission system that blocks
-> process debugging and inspection. kpexec reduces routine secret exposure and
-> constrains how credentials are used; it does not turn unrestricted local code
-> into a safe principal. Read the [threat model](https://github.com/crazytan/kpexec/blob/main/docs/security.md) before adoption.
+> same-user shell. On macOS, such an agent can read a non-`CS_RESTRICT` child's
+> initial environment through `KERN_PROCARGS2` (including `ps -E`/`ps eww`)
+> without attaching a debugger. Hardened runtime limits some task-port and
+> process-memory access, but does not hide that environment. Use kpexec only
+> with a sandbox or permission system verified to block both process-environment
+> inspection and debugger/task-port access. kpexec reduces routine secret
+> exposure and constrains how credentials are used; it does not turn
+> unrestricted local code into a safe principal. Read the [threat model](https://github.com/crazytan/kpexec/blob/main/docs/security.md) before adoption.
 
 ## Why this exists
 
@@ -122,7 +124,8 @@ Within the documented threat model and a correctly installed release:
 
 Important residual risks include:
 
-- an unrestricted same-user process may debug or inspect an attachable child;
+- an unrestricted same-user process can inspect a non-`CS_RESTRICT` child's
+  initial environment and may be able to inspect its memory;
 - trailing arguments can redirect many CLIs to attacker-controlled endpoints;
 - the caller's working directory is inherited, so repository-controlled config
   may affect an allowed tool;
@@ -189,8 +192,10 @@ sudo chflags uchg /usr/local/libexec/kpexec/gh
 ```
 
 This makes the byte pin enforceable; it does not make the running CLI
-confidential from an unrestricted same-UID debugger. Keep the agent sandboxed
-and prefer a self-contained hardened-runtime target as described in the user guide.
+confidential from an unrestricted same-UID process. In particular, hardened
+runtime does not hide its initial environment. Keep the agent inside a boundary
+verified to deny process-environment inspection as well as debugger/task-port
+access, as described in the user guide.
 
 Create an entry with the interactive wizard and add one or more narrowly scoped
 command templates:

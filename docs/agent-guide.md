@@ -19,9 +19,11 @@ executable and endpoint-sensitive fixed arguments. Rollback protection, local
 malware resistance, and protection after vault-password disclosure are outside
 the v1 guarantee. In particular, injecting a credential into a child environment
 does **not** keep it confidential from an unrestricted same-UID process: an
-attachable child may expose its environment or memory through debugger/task-port
-access. Never describe kpexec as a secret boundary against an agent that has
-unrestricted same-user execution.
+ordinary `KERN_PROCARGS2` query (including `ps -E`/`ps eww`) can expose a
+non-`CS_RESTRICT` child's initial environment without debugger access. Hardened
+runtime separately limits some debugger/task-port access to memory; it does not
+hide that environment. Never describe kpexec as a secret boundary against an
+agent that has unrestricted same-user execution.
 
 ## Security boundary: preserve these properties
 

@@ -25,6 +25,8 @@ Keychain identity and are not equivalent to the published package.
 
 Read [Security and threat model](docs/security.md) before filing a boundary
 bypass. In particular, v0.1 does not claim credential confidentiality from an
-unrestricted same-UID agent capable of debugger/task-port access to the
-credential-bearing child. Reports that demonstrate impact within the stated
-constrained-agent model—or a way to escape that model—are especially useful.
+unrestricted same-UID agent. A non-`CS_RESTRICT` child's initial environment can
+be exposed through `KERN_PROCARGS2` (including `ps -E`/`ps eww`) without
+debugger access, while debugger/task-port access is a separate process-memory
+risk. Reports that demonstrate impact within the stated constrained-agent
+model—or a way to escape that model—are especially useful.

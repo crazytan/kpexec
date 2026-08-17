@@ -50,19 +50,28 @@ The protected-main run for v0.1.0 passed both required jobs:
 
 ## Threat-boundary validation
 
-The announcement review also tested the explicit same-UID non-guarantee with
-synthetic credentials only. On macOS 26.6.1, a same-user LLDB process attached
-to an ad-hoc-signed Homebrew `gh` child and read the synthetic injected value
-from the live process. The same attach attempt was denied for Apple system
-binaries and a synthetic binary signed with hardened runtime. This is why the
-adoption contract requires a separate agent sandbox or permission boundary and
-recommends hardened targets. Hardened runtime is defense in depth: it does not
-establish confidentiality for descendants or other code the child loads.
+Threat-boundary testing used synthetic credentials only. On macOS 26.6.1, a
+same-user process recovered a synthetic value from the initial environment of
+ad-hoc-signed, Homebrew `gh`, and hardened-runtime targets through direct
+`KERN_PROCARGS2` queries and through `ps -E`/`ps eww`. No debugger attachment or
+authorization prompt was required. Apple platform binaries and a synthetic
+target carrying `CS_RESTRICT` omitted their environment from those queries.
+That is observed OS behavior, not a documented kpexec-supported contract:
+kpexec does not currently require or diagnose `CS_RESTRICT`, and a descendant
+that inherits the credential is evaluated independently.
 
-Current macOS did not expose the tested target's environment through `ps` or a
-plain `KERN_PROCARGS2` query. The documented limitation is debugger/task-port
-and process-memory access to attachable children, not a blanket claim that
-ordinary process listing exposes every target's environment.
+Separate LLDB tests attached to the ad-hoc-signed `gh` target but were denied by
+the hardened-runtime target. Hardened runtime is therefore useful defense in
+depth for task-port and process-memory access, not protection for the initial
+environment. Calling `unsetenv` did not erase the original stack bytes; an
+in-place overwrite did in the synthetic target, but kpexec cannot assume that
+arbitrary supported CLIs will perform one before an observer reads them.
+
+Sandbox probes also showed that individual process-info or sysctl denial rules
+were not reliable evidence on their own; a combined tested boundary denied the
+observed environment-query paths. Adoption therefore requires end-to-end
+negative probes of both process-environment and debugger/task-port access in the
+actual agent sandbox or permission system.
 
 ## Supervised macOS tests
 
@@ -107,7 +116,7 @@ documented rollback behavior.
 | A1 | Dry run resolves policy and prints exact argv. It may parse the vault, but does not extract or inject the selected credential and does not spawn a child. | Automated |
 | A2 | Unknown entry/command, malformed or forward-version policy, duplicate ID, and unknown fields fail with the expected JSON status and no spawn. | Automated |
 | A3 | A run executes exactly `[exe] + fixed prefix + trailing argv` with the defined minimal environment plus the one injected variable. | Automated + installed |
-| A4 | The synthetic credential is absent from stdout, stderr, JSON, kpexec logs, and captured temporary artifacts after a full run. This does not test debugger or process-memory access. | Automated + installed |
+| A4 | The synthetic credential is absent from stdout, stderr, JSON, kpexec logs, and captured temporary artifacts after a full run. This does not test process-environment queries, debugger/task-port access, or process-memory access. | Automated + installed |
 | A5 | Exact, JSON-escaped, and URL-encoded forms are redacted; a residual match suppresses both streams and fails closed. | Automated |
 | A6 | Child exits and signals propagate under the documented contract; broker failures remain distinguishable through `kpexec_status`. | Automated |
 | A7 | Timeout sends SIGTERM, escalates to SIGKILL after the grace period, and returns bounded redacted partial output with timeout status. | Automated |

@@ -4,9 +4,10 @@ This document is for a configured coding agent that invokes kpexec. It is
 separate from the repository's [development-agent guide](agent-guide.md).
 
 The human must first install kpexec, author the policies, and place the agent in
-a sandbox or permission boundary that denies debugger/task-port access,
-process-memory inspection, and unrestricted signaling. kpexec is not a
-credential-confidentiality boundary for an unrestricted same-UID agent.
+a sandbox or permission boundary verified to deny process-environment reads
+(`KERN_PROCARGS2`, `ps -E`, and `ps eww`), debugger/task-port and process-memory
+access, and unrestricted signaling. kpexec is not a credential-confidentiality
+boundary for an unrestricted same-UID agent.
 
 ## Copy-paste agent policy
 

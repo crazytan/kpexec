@@ -7,7 +7,7 @@ This file applies to the entire repository. Read
 ## Working rules
 
 - kpexec is a security boundary, not a general command runner. Preserve deny-by-default behavior, direct execution without a shell, executable pinning, the minimal child environment, user-presence authorization for every mutation, and secret-free output and logs.
-- Do not claim credential confidentiality from an unrestricted same-UID process. An attachable child may expose its environment or memory through debugger/task-port access; preserve this limitation and re-check the threat model whenever documentation or a security boundary changes.
+- Do not claim credential confidentiality from an unrestricted same-UID process. Such a process can read a non-`CS_RESTRICT` child's initial environment through `KERN_PROCARGS2` (including `ps -E`/`ps eww`) without debugger access; hardened runtime separately limits some debugger/task-port access to memory but does not hide that environment. Preserve this limitation and re-check the threat model whenever documentation or a security boundary changes.
 - Treat the checkout, configuration, ambient environment, CLI arguments, vault path hints, and subprocess output as attacker-controlled. Never use a secret from an argument, environment variable, fixture committed to Git, log, or error message.
 - Preserve the user's working tree. Inspect `git status` before editing; do not discard or rewrite unrelated work.
 - Use `cargo` with `--locked`. Do not update dependencies or either lockfile unless the task explicitly requires it.

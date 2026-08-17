@@ -8,9 +8,11 @@ invoke a small number of trusted CLIs without receiving their reusable
 credentials.
 
 Do not rely on it to hide a credential from an unrestricted process running as
-your macOS user: that process may attach to an attachable child through
-debugger/task-port access and inspect its environment or memory. Also avoid V1
-when safe use requires strict validation of trailing arguments or the working
+your macOS user: that process can inspect a non-`CS_RESTRICT` child's initial
+environment through `KERN_PROCARGS2` (including `ps -E`/`ps eww`) without
+debugger access. Hardened runtime does not hide that environment, though it
+separately limits some debugger/task-port access to memory. Also avoid V1 when
+safe use requires strict validation of trailing arguments or the working
 directory. Read [Security and threat model](security.md) first.
 
 ## Install the release
@@ -73,11 +75,20 @@ Copy self-contained binaries, not scripts or shims that load user-writable code.
 The immutable flag is defense in depth; kpexec's enforceability check is based
 on ownership and write permissions across the canonical path.
 
-Path ownership and pinning do not make the running process confidential. Prefer
-a self-contained hardened-runtime target without a debug entitlement, and keep
-the agent inside a sandbox that denies debugger/task-port access and unrestricted
-signaling. Hardened runtime reduces direct attachment risk; it does not prove
-that descendants, plugins, config files, or network destinations are safe.
+Path ownership and pinning do not make the running process confidential. Keep
+the agent inside a sandbox or permission boundary that has been tested to deny
+ordinary process-environment reads (`KERN_PROCARGS2`, `ps -E`, and `ps eww`),
+debugger/task-port access, and unrestricted signaling. Do not assume that a
+generic process-info or sysctl denial covers all of those paths; probe the
+deployed boundary end to end with synthetic values.
+
+A self-contained hardened-runtime target without a debug entitlement remains
+useful defense in depth against direct memory attachment. It does **not** hide
+the target's initial environment. Apple platform and synthetic targets carrying
+`CS_RESTRICT` omitted that environment in testing, but this is observed OS
+behavior rather than a kpexec-supported contract. kpexec does not enforce or
+diagnose the property, and a descendant can have different visibility. Do not
+treat target signing as a substitute for the agent boundary.
 
 ## Add a credential and capability
 
@@ -183,6 +194,7 @@ credential rather than merely repinning or editing policy.
   plans.
 - Authentication or Keychain prompts appear only when you initiated a mutation.
 - Recovery material remains outside the agent's accessible files.
-- Agent permissions still prevent same-UID process inspection/debugging.
+- Synthetic probes confirm that agent permissions still prevent
+  `KERN_PROCARGS2`/`ps -E` environment reads and debugger/task-port access.
 - Policies are reviewed after CLI upgrades and when the target service adds new
   global flags, config behavior, or plugins.
