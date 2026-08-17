@@ -1,6 +1,6 @@
 //! The clap command tree.
 //!
-//! Mirrors the subcommand surface in `docs/cli-design.md` exactly. This module
+//! Mirrors the subcommand surface documented in `docs/design.md`. This module
 //! only *describes* the CLI; dispatch and behavior live in [`crate::commands`].
 
 use std::path::PathBuf;
@@ -17,13 +17,13 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Execute an allowed command template (the only agent-facing command).
+    /// Execute an allowed command template (the primary agent-facing command).
     Run(RunArgs),
 
     /// Create and initialize a new vault.
     Init(InitArgs),
 
-    /// Validate config, filesystem, and (in later milestones) the vault.
+    /// Validate config, filesystem, signing identity, Keychain, and vault.
     Doctor,
 
     /// Entry and policy management.

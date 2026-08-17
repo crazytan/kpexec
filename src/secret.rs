@@ -4,8 +4,8 @@
 //! secrets — is held in a [`Secret`] from the moment it is read or prompted.
 //! The wrapper is built on the `secrecy`/`zeroize` crates so the underlying
 //! bytes are scrubbed on drop and can never be `Debug`/`Display`-printed by
-//! accident. This is security-design invariant 9 ("secrets held in zeroizing
-//! wrapper types; never logged; never echoed").
+//! accident. See the secret-lifetime and logging boundaries in
+//! `docs/security.md`.
 //!
 //! Secrets must NEVER be passed through the logging facade
 //! ([`crate::logging`]) — there is no code path that does so, and the wrapper
@@ -18,8 +18,7 @@ use secrecy::{ExposeSecret, SecretString};
 /// Wraps `secrecy::SecretString`. There is deliberately no `Display`, no
 /// `Debug` that reveals contents, and no `Serialize` — the only way to reach
 /// the bytes is [`Secret::expose`], which callers use at exactly the two
-/// permitted boundaries (unlock the vault; inject into a child env in a later
-/// milestone).
+/// permitted boundaries (unlock the vault; inject into an approved child env).
 #[derive(Clone)]
 pub struct Secret(SecretString);
 

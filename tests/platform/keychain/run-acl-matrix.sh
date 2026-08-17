@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# run-tests.sh — orchestrates the milestone-zero item-2 Keychain ACL matrix.
+# Supervised Keychain ACL platform acceptance matrix.
 #
 # THIS SCRIPT TRIGGERS KEYCHAIN GUI PROMPTS. Run it only with a human present who can
 # watch the screen and answer/deny dialogs. It is fail-closed and echoes every command.
 #
-# What it proves (milestone doc item 2 + security-design "Vault access control"):
+# What it proves (see docs/testing.md and docs/security.md):
 #   T1  Apple-Development-signed binary (isolated .spike identifier + hardened runtime)
 #       creates an item and reads it back  -> EXPECT silent success, no dialog.
 #   T2  the SAME item read by a DIFFERENTLY-signed copy (ad-hoc, different identifier)
@@ -16,7 +16,7 @@
 #       an agent whitelisting kpexec) read by the signed kcprobe -> RECORD whether it is
 #       silently readable. If it IS, that is a FAIL of the anti-substitution design
 #       assumption and is flagged LOUDLY.
-#   T5  `run-backend-test.sh` separately signs a feature-gated profile of the real Rust
+#   T5  `run-backend.sh` separately signs a feature-gated profile of the real Rust
 #       backend and exercises its complete lifecycle on a unique isolated-service account.
 #
 # NOTE (partition-list investigation — answer to be confirmed at runtime):
@@ -139,7 +139,7 @@ preflight() {
         echo "preflight: $failures failure(s)" >&2
         return 1
     fi
-    echo "preflight: PASS — ready for one supervised ./run-tests.sh session"
+    echo "preflight: PASS — ready for one supervised ./run-acl-matrix.sh session"
 }
 
 if [[ "${1:-}" == "--preflight" ]]; then
@@ -160,7 +160,7 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/kpexec-keychain-acl.XXXXXX")"
 BIN="$WORK/kcprobe"                    # T1/T3 signed binary
 BIN_COPY="$WORK/kcprobe-copy"          # T2 differently-signed copy
 
-echo "== kpexec keychain-acl spike =="
+echo "== kpexec Keychain ACL platform test =="
 echo "service (isolated):    $SERVICE"
 echo "identity:              $IDENTITY"
 echo "identifier:            $IDENTIFIER"
@@ -234,7 +234,7 @@ cleanup() {
     main_still_exists=$?
     set -e
     if [[ "$main_still_exists" -eq 0 ]]; then
-        echo ">>> Cleanup fallback must delete $ACCT_MAIN; approve only this isolated spike item."
+        echo ">>> Cleanup fallback must delete $ACCT_MAIN; approve only this isolated test item."
         /usr/bin/security delete-generic-password \
             -s "$SERVICE" -a "$ACCT_MAIN" login.keychain-db >/dev/null 2>&1 || true
     fi
@@ -255,7 +255,7 @@ record "date=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 record "operator=${USER:-unknown}"
 record "macOS=$(sw_vers -productVersion) build=$(sw_vers -buildVersion)"
 record "service=$SERVICE"
-record "NOTE: synthetic spike values only; no real credential data is recorded."
+record "NOTE: synthetic test values only; no real credential data is recorded."
 
 # =========================================================================
 # T1 — build, sign (Apple Development + isolated identifier), create+read
@@ -460,4 +460,4 @@ echo "== all test steps executed: $overall =="
 echo "== machine + human observations saved to: $RESULTS_FILE =="
 echo "== Attach that file to the implementation task; it contains no real secret. =="
 echo "== cleanup runs now via trap. =="
-echo "== Next: run ./run-backend-test.sh --preflight, then ./run-backend-test.sh supervised. =="
+echo "== Next: run ./run-backend.sh --preflight, then ./run-backend.sh supervised. =="

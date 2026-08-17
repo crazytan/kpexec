@@ -1,16 +1,15 @@
 //! Vault I/O: open, atomic save, and the kpexec-entry mapping.
 //!
 //! This module is the single boundary between kpexec's data model and the
-//! KeePass KDBX4 file. It enforces the KDBX rules from `docs/cli-design.md`:
+//! KeePass KDBX4 file. It enforces the storage rules in `docs/design.md`:
 //!
 //! * **Vault identity binding** — a vault is opened only via the password in
 //!   the ACL-protected Keychain item, and only at the `db_path` *inside* that
 //!   item. `config.toml`'s `db_path` is an untrusted hint that must *agree*;
-//!   any mismatch is a config-error (security-design anti-substitution).
+//!   any mismatch is a config-error (the vault anti-substitution boundary).
 //! * **Atomic writes** — serialize to `<vault>.tmp` in the vault's directory,
 //!   fsync, then rename over the vault only after `save()` returns Ok, keeping
-//!   a `.bak` of the previous file. Never truncate-in-place (the spike proved
-//!   that destroys a vault on a failed save).
+//!   a `.bak` of the previous file. Never truncate in place.
 //! * **Version pin** — every save sets `db.config.version = KDB4(1)` before
 //!   `save()`, because KeePassXC downgrades to 4.0 and the crate's dumper only
 //!   accepts 4.1.
@@ -312,8 +311,8 @@ impl Vault {
     /// This is deliberately a **separate** call from [`Vault::find_entry`]: the
     /// run path resolves the entry + command (and verifies the pin) via
     /// `find_entry` alone, and only ever calls this on the actual spawn path.
-    /// `--dry-run` never calls it, which is what makes the "no secret read on
-    /// dry-run" guarantee structural rather than a convention.
+    /// `--dry-run` never calls it, so the selected credential is not explicitly
+    /// extracted from the already parsed vault.
     ///
     /// Rejects on a missing/empty Password or a duplicate id (deny by default).
     pub fn read_secret(&self, id: &str) -> Result<Secret> {

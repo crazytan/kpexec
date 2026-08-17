@@ -1,6 +1,6 @@
 //! `kpexec check [--entry <id>]` — validate policies without running anything.
 //!
-//! Validates, per cli-design:
+//! Validates the policy and pin invariants documented in `docs/design.md`:
 //! * policy JSON parses (with `deny_unknown_fields` — unknown fields reject),
 //! * the schema string is known,
 //! * `kpexec.id` is unique across the vault,

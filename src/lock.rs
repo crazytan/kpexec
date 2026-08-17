@@ -1,7 +1,6 @@
 //! Vault write locking + KeePassXC-lockfile detection.
 //!
-//! Two independent guards protect a vault write (security-design "Policy
-//! integrity"; cli-design KDBX rules):
+//! Two independent guards protect a vault write (see `docs/design.md`):
 //!
 //! 1. **kpexec write lock** — a `<vault>.kpexec-lock` file adjacent to the
 //!    vault holding the holder's PID + start time. A second kpexec process

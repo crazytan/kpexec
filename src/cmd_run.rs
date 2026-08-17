@@ -1,7 +1,8 @@
-//! `kpexec run` — the run path (M4). The most security-critical code in the
+//! `kpexec run` — the most security-critical code in the
 //! project: argv and env construction *is* the security boundary.
 //!
-//! This module implements security-design invariants 1–7. In one place, in the
+//! This module implements the execution invariants from `docs/security.md`. In
+//! one place, in the
 //! documented order, it:
 //!
 //! 1. **Resolves** the request: open the vault (identity-bound), find the entry
@@ -32,14 +33,13 @@
 //! [`crate::logging::log_run_result`] with an argv hash over the *full* final
 //! argv, and never logs raw args or the secret.
 //!
-//! # The no-secret-on-dry-run guarantee
+//! # The no-selected-credential-extraction-on-dry-run guarantee
 //!
-//! The secret is read only by [`Vault::read_secret`], and that call lives on a
-//! single line in `spawn_and_wait`, reachable only after the `--dry-run`
-//! early-return. Resolution (`resolve`) and pin verification never touch the
-//! Password field. So `--dry-run` structurally cannot read the secret — it is
-//! not a matter of an untaken branch inside the spawn code, it is a call the
-//! dry-run path never reaches.
+//! [`Vault::read_secret`] explicitly extracts the selected credential, and that
+//! call lives in `spawn_and_wait`, reachable only after the `--dry-run` early
+//! return. Resolution opens and parses the encrypted vault, so protected fields
+//! may exist in the parser's memory. The dry-run path does not extract the
+//! selected credential, inject it into an environment, or start a child.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -216,7 +216,7 @@ pub fn run_with(
         );
     }
 
-    // ---- dry-run stops here: NO secret read, NO subprocess ----------------
+    // ---- dry-run stops here: no selected credential extraction or child ---
     if args.dry_run {
         return emit_dry_run(
             emit,
@@ -422,8 +422,8 @@ struct Spawned {
 }
 
 /// Read the secret, build the command, spawn it, and drive it to completion or
-/// timeout. This is the ONLY function that reads the secret (see the module
-/// docs' no-secret-on-dry-run guarantee).
+/// timeout. This is the only function that explicitly extracts the selected
+/// credential (see the module's dry-run guarantee).
 fn spawn_and_wait(
     vault: &Vault,
     entry_id: &str,
@@ -724,8 +724,8 @@ fn emit_spawned(
     }
 }
 
-/// Emit a `--dry-run`: print the exact argv, log, return success. No secret, no
-/// subprocess.
+/// Emit a `--dry-run`: print the exact argv, log, return success. No selected
+/// credential extraction or subprocess.
 fn emit_dry_run(
     emit: &mut Emit<'_>,
     args: &RunArgs,

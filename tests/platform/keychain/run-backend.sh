@@ -17,7 +17,7 @@ readonly DEVELOPMENT_REQUIREMENT="identifier \"$IDENTIFIER\" and anchor apple ge
 readonly PRODUCTION_REQUIREMENT="identifier \"dev.crazytan.kpexec\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"$TEAM_ID\""
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/../.." && pwd)"
+ROOT="$(cd "$HERE/../../.." && pwd)"
 RESULTS_FILE="${KPEXEC_BACKEND_RESULTS_FILE:-$HERE/keychain-backend.local-results.txt}"
 WORK=""
 BINARY=""
@@ -38,13 +38,13 @@ preflight() {
     done
     if cargo build --manifest-path "$ROOT/Cargo.toml" --release --locked \
         --example keychain_backend_probe >/dev/null 2>&1; then
-        echo "FAIL: backend probe built without its supervised-probes feature" >&2
+        echo "FAIL: backend probe built without its platform-tests feature" >&2
         failures=$((failures + 1))
     else
         echo "OK: default/release build excludes the backend probe"
     fi
     cargo build --manifest-path "$ROOT/Cargo.toml" --release --locked \
-        --features supervised-probes --example keychain_backend_probe
+        --features platform-tests --example keychain_backend_probe
     echo "OK: development-profile backend probe builds only with its explicit feature"
 
     identity_output="$(/usr/bin/security find-identity -v -p codesigning 2>&1)"
@@ -63,7 +63,7 @@ preflight() {
         echo "preflight: $failures failure(s)" >&2
         return 1
     fi
-    echo "preflight: PASS — ready for one supervised ./run-backend-test.sh session"
+    echo "preflight: PASS — ready for one supervised ./run-backend.sh session"
 }
 
 if [[ "${1:-}" == "--preflight" ]]; then
@@ -135,7 +135,7 @@ BINARY="$WORK/keychain_backend_probe"
 ACCOUNT="backend-spike:$(/usr/bin/uuidgen | tr '[:upper:]' '[:lower:]')"
 
 cargo build --manifest-path "$ROOT/Cargo.toml" --release --locked \
-    --features supervised-probes --example keychain_backend_probe
+    --features platform-tests --example keychain_backend_probe
 cp "$ROOT/target/release/examples/keychain_backend_probe" "$BINARY"
 
 pause "Apple Development signing may request private-key access. Approve only '$IDENTITY'."

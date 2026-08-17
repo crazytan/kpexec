@@ -1,13 +1,13 @@
 //! The policy JSON document (`kpexec.policy.v1`).
 //!
 //! One policy is stored per entry in the `kpexec.policy.v1` custom string
-//! field, exactly per `docs/cli-design.md`. The `id` is NOT part of the JSON —
+//! field, as documented in `docs/design.md`. The `id` is NOT part of the JSON —
 //! identity lives solely in the separate `kpexec.id` field (the single source
 //! of truth). This module is the parse/serialize boundary and enforces the
 //! deny-by-default posture:
 //!
 //! * `#[serde(deny_unknown_fields)]` on every struct — an unknown field
-//!   rejects the whole document (security-design invariant 11).
+//!   rejects the whole document.
 //! * the `schema` string must equal [`POLICY_SCHEMA`]; a future revision ships
 //!   as `kpexec.policy.v2` rather than mutating v1.
 //!
@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The one schema string this milestone understands.
+/// The one schema string this release understands.
 pub const POLICY_SCHEMA: &str = "kpexec.policy.v1";
 
 /// The `kpexec.id` custom-field key (identity, single source of truth).

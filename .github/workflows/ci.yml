@@ -47,29 +47,21 @@ jobs:
       - name: Test all targets
         run: cargo test --locked --all-targets --all-features
 
-      - name: Prove supervised Keychain profile isolation
+      - name: Prove platform-test trust-domain isolation
         if: matrix.rust == 'stable'
         shell: bash
         run: |
           set -euo pipefail
           if cargo build --release --locked --example keychain_backend_probe 2>/dev/null; then
-            echo "backend probe unexpectedly built without supervised-probes" >&2
+            echo "backend probe unexpectedly built without platform-tests" >&2
             exit 1
           fi
-          cargo build --release --locked --features supervised-probes \
+          cargo build --release --locked --features platform-tests \
             --example keychain_backend_probe
-          cargo test --locked --features supervised-probes \
+          cargo test --locked --features platform-tests \
             development_probe_cannot_enter_production_trust_domain
-          cargo test --locked --features supervised-probes \
+          cargo test --locked --features platform-tests \
             development_probe_refuses_production_accounts
-          set +e
-          ./spikes/signing/sign.sh >/dev/null 2>&1
-          signer_rc=$?
-          set -e
-          if [[ "$signer_rc" -ne 64 ]]; then
-            echo "legacy arbitrary-binary signer did not fail closed (rc=$signer_rc)" >&2
-            exit 1
-          fi
 
       - name: Test release profile
         if: matrix.rust == 'stable'
@@ -87,47 +79,17 @@ jobs:
           advisory_db="$RUNNER_TEMP/rustsec-advisory-db"
           git clone --depth 1 https://github.com/RustSec/advisory-db.git "$advisory_db"
           cargo audit --no-fetch --db "$advisory_db" --deny warnings
-          cargo audit --no-fetch --db "$advisory_db" --deny warnings --file spikes/kdbx-roundtrip/Cargo.lock
 
       - name: Build documentation with warnings denied
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --all-features --no-deps
 
-      - name: Check KDBX spike formatting
-        run: cargo fmt --manifest-path spikes/kdbx-roundtrip/Cargo.toml -- --check
-
-      - name: Lint KDBX spike
-        run: >-
-          cargo clippy
-          --manifest-path spikes/kdbx-roundtrip/Cargo.toml
-          --locked
-          --all-targets
-          -- -D warnings
-
-      - name: Build KDBX spike documentation with warnings denied
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: >-
-          cargo doc
-          --manifest-path spikes/kdbx-roundtrip/Cargo.toml
-          --locked
-          --no-deps
-
-      - name: Exercise KDBX round trip
-        shell: bash
-        run: |
-          set -euo pipefail
-          vault="$RUNNER_TEMP/kpexec-spike.kdbx"
-          cargo run --quiet --manifest-path spikes/kdbx-roundtrip/Cargo.toml --locked -- create "$vault"
-          cargo run --quiet --manifest-path spikes/kdbx-roundtrip/Cargo.toml --locked -- modify "$vault"
-          cargo run --quiet --manifest-path spikes/kdbx-roundtrip/Cargo.toml --locked -- verify "$vault"
-
       - name: Install ShellCheck
         if: matrix.rust == 'stable'
         run: brew install shellcheck
 
-      - name: Check spike shell scripts
+      - name: Check shell scripts
         if: matrix.rust == 'stable'
         shell: bash
         run: |
@@ -135,11 +97,9 @@ jobs:
           scripts=(
             scripts/release.sh
             scripts/test-release.sh
-            spikes/keychain-acl/run-backend-test.sh
-            spikes/keychain-acl/run-tests.sh
-            spikes/local-auth/run-tests.sh
-            spikes/signing/notarize.sh
-            spikes/signing/sign.sh
+            tests/platform/keychain/run-acl-matrix.sh
+            tests/platform/keychain/run-backend.sh
+            tests/platform/local-auth/run.sh
           )
           bash -n "${scripts[@]}"
           shellcheck "${scripts[@]}"
@@ -148,13 +108,12 @@ jobs:
         if: matrix.rust == 'stable'
         run: ./scripts/test-release.sh
 
-      - name: Type-check macOS spike probes and verify production auth linkage
+      - name: Verify production macOS auth linkage
         if: matrix.rust == 'stable'
         shell: bash
         run: |
           set -euo pipefail
-          /usr/bin/swiftc -typecheck -framework Security spikes/keychain-acl/kcprobe.swift
-          /usr/bin/swiftc -typecheck -framework LocalAuthentication -framework Security spikes/local-auth/laprobe.swift
+          /usr/bin/swiftc -typecheck -framework Security tests/platform/keychain/kcprobe.swift
           /usr/bin/clang -fsyntax-only -fobjc-arc -Wall -Wextra -Werror src/user_presence_shim.m
           cargo build --release --locked --bin kpexec --example user_presence_probe
           otool -L target/release/examples/user_presence_probe | grep -F '/LocalAuthentication.framework/'
